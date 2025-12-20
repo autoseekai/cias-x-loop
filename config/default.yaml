@@ -1,0 +1,63 @@
+# AI Scientist for SCI - Configuration File
+# Version: 3.0.0
+
+# LLM Configuration
+llm:
+  # OpenAI Configuration (default)
+  base_url: "https://generativelanguage.googleapis.com/v1beta/openai/"
+  api_key: "${OPENAI_API_KEY}"  # Use environment variable
+  model: "gemini-2.5-flash"
+  temperature: 0.3
+  max_tokens: 40960
+
+  # Alternative: DeepSeek
+  # base_url: "https://api.deepseek.com/v1"
+  # api_key: "${DEEPSEEK_API_KEY}"
+  # model: "deepseek-chat"
+
+  # Alternative: Qwen
+  # base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+  # api_key: "${QWEN_API_KEY}"
+  # model: "qwen-turbo"
+
+  # Alternative: Moonshot
+  # base_url: "https://api.moonshot.cn/v1"
+  # api_key: "${MOONSHOT_API_KEY}"
+  # model: "moonshot-v1-8k"
+
+  # Alternative: Local Ollama
+  # base_url: "http://localhost:11434/v1"
+  # api_key: "ollama"
+  # model: "llama2"
+
+# Design Space
+design_space:
+  compression_ratios: [8, 16, 24]
+  mask_types: ["random", "optimized"]
+  recon_families: ["CIAS-Core"]
+  num_stages: [5, 7, 9]
+  num_features: [32, 64, 128]
+  num_blocks: [2, 3, 4]
+  learning_rates: [1e-4, 5e-5]
+  activations: ["ReLU", "LeakyReLU"]
+
+# Experiment Settings
+experiment:
+  budget_max: 20
+  max_cycles: 5
+  mock_mode: false
+
+# Planner Settings
+planner:
+  max_configs_per_cycle: 3
+
+# Executor Settings
+executor:
+  api_base_url: "http://localhost:8000"
+  timeout: 30
+  poll_interval: 1.0
+  max_poll_attempts: 300
+
+# Database Settings
+database:
+  path: "world_model_v3.db"
