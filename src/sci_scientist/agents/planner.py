@@ -353,9 +353,14 @@ Always respond with valid JSON."""},
             for pc in context['pareto_configs'][:5]:
                 obj = pc.get('objectives', {})
                 cfg = pc.get('config', {})
+
+                # Format objectives safely
+                psnr_str = f"{obj['psnr']:.2f}" if obj.get('psnr') else "N/A"
+                ssim_str = f"{obj['ssim']:.4f}" if obj.get('ssim') else "N/A"
+
                 pareto_lines.append(
-                    f"  - {pc['id']}: PSNR={obj.get('psnr', 'N/A'):.2f}dB, SSIM={obj.get('ssim', 'N/A'):.4f}, "
-                    f"CR={cfg.get('compression_ratio')}, stages={cfg.get('num_stages')}, features={cfg.get('num_features')}"
+                    f"  - {pc['id']}: PSNR={psnr_str}dB, SSIM={ssim_str}, "
+                    f"CR={cfg.get('compression_ratio', 'N/A')}, stages={cfg.get('num_stages', 'N/A')}, features={cfg.get('num_features', 'N/A')}"
                 )
             if pareto_lines:
                 pareto_section = f"""
