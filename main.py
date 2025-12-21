@@ -77,7 +77,7 @@ def main():
 
     # Initialize components
     world_model = WorldModel(db_path)
-    planner = PlannerAgent(config.get('planner', {}), llm_config=llm_config)
+    planner = PlannerAgent(config.get('planner', {}), llm_config=llm_config, world_model=world_model)
 
     # Executor config (merge with mock mode setting)
     executor_config = config.get('executor', {})

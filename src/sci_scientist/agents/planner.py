@@ -107,7 +107,7 @@ class ConfigHasher:
 class PlannerAgent:
     """LLM-driven experiment planning agent with deduplication"""
 
-    def __init__(self, config: Dict[str, Any], llm_config: Optional[Dict[str, Any]] = None):
+    def __init__(self, config: Dict[str, Any], llm_config: Optional[Dict[str, Any]] = None, world_model: Optional[Any] = None):
         """
         Initialize planner agent
 
@@ -116,11 +116,13 @@ class PlannerAgent:
                 - max_configs_per_cycle: Maximum configs per cycle
                 - use_llm: Whether to use LLM for planning (default True)
             llm_config: LLM configuration dictionary (optional)
+            world_model: WorldModel instance for efficient hash checking (optional)
         """
         self.config = config
         self.max_configs_per_cycle = config.get("max_configs_per_cycle", 3)
         self.use_llm = config.get("use_llm", True) and llm_config is not None
         self.max_dedup_retries = config.get("max_dedup_retries", 5)
+        self.world_model = world_model
 
         # Initialize LLM client if config provided
         self.llm_client = None
@@ -131,28 +133,42 @@ class PlannerAgent:
                 logger.warning(f"Failed to initialize LLM client: {e}")
                 self.use_llm = False
 
-        # Track existing config hashes
+        # Track existing config hashes (loaded from DB only when needed)
         self.existing_hashes: Set[str] = set()
 
-        logger.info(f"Planner Agent initialized (max {self.max_configs_per_cycle} per cycle, LLM={self.use_llm})")
+        logger.info(f"Planner Agent initialized (max {self.max_configs_per_cycle} per cycle, LLM={self.use_llm}, WorldModel={'Yes' if world_model else 'No'})")
 
-    def set_existing_configs(self, experiments: List[Any]):
+    def set_existing_configs(self, experiments: List[Any] = None):
         """
-        Set existing configuration hashes from completed experiments
+        Set existing configuration hashes from completed experiments.
+        If WorldModel is available, uses efficient SQL query instead of loading all configs.
 
         Args:
-            experiments: List of completed experiments from WorldModel
+            experiments: List of completed experiments (optional if WorldModel is set)
         """
         self.existing_hashes.clear()
-        for exp in experiments:
-            if hasattr(exp, 'config'):
-                if isinstance(exp.config, dict):
-                    hash_val = ConfigHasher.compute_hash_from_dict(exp.config)
-                else:
-                    hash_val = ConfigHasher.compute_hash(exp.config)
-                self.existing_hashes.add(hash_val)
 
-        logger.info(f"Loaded {len(self.existing_hashes)} existing config hashes")
+        # If WorldModel is available, use SQL query (much more efficient)
+        if self.world_model:
+            try:
+                self.existing_hashes = self.world_model.get_all_config_hashes()
+                logger.info(f"Loaded {len(self.existing_hashes)} existing config hashes from database (SQL query)")
+                return
+            except Exception as e:
+                logger.warning(f"Failed to load hashes from WorldModel: {e}, falling back to experiment list")
+
+        # Fallback: compute hashes from experiment list
+        if experiments:
+            for exp in experiments:
+                if hasattr(exp, 'config'):
+                    if isinstance(exp.config, dict):
+                        hash_val = ConfigHasher.compute_hash_from_dict(exp.config)
+                    else:
+                        hash_val = ConfigHasher.compute_hash(exp.config)
+                    self.existing_hashes.add(hash_val)
+            logger.info(f"Loaded {len(self.existing_hashes)} existing config hashes from experiment list")
+        else:
+            logger.warning("No WorldModel or experiments provided for deduplication")
 
     def plan_experiments(
         self,
@@ -175,9 +191,9 @@ class PlannerAgent:
         Returns:
             List of new experiment configurations (deduplicated)
         """
-        # Update existing hashes if provided
-        if existing_experiments:
-            self.set_existing_configs(existing_experiments)
+        # Update existing hashes for deduplication
+        # If WorldModel is available, it will use efficient SQL query
+        self.set_existing_configs(existing_experiments)
 
         num_configs = min(self.max_configs_per_cycle, budget)
         configs = []
@@ -278,7 +294,8 @@ class PlannerAgent:
 
     def _is_unique(self, config: SCIConfiguration) -> bool:
         """
-        Check if configuration is unique (not in existing hashes)
+        Check if configuration is unique (not in existing hashes).
+        First checks in-memory set, can fallback to SQL query if WorldModel available.
 
         Args:
             config: Configuration to check
@@ -287,7 +304,20 @@ class PlannerAgent:
             True if unique, False if duplicate
         """
         hash_val = ConfigHasher.compute_hash(config)
-        return hash_val not in self.existing_hashes
+
+        # Check in-memory set first (fastest)
+        if hash_val in self.existing_hashes:
+            return False
+
+        # If in-memory set is empty and WorldModel available, check database
+        # This is useful if set_existing_configs wasn't called
+        if not self.existing_hashes and self.world_model:
+            try:
+                return not self.world_model.config_hash_exists(hash_val)
+            except Exception as e:
+                logger.warning(f"Failed to check hash in database: {e}")
+
+        return True
 
     def _llm_generate_configs(
         self,

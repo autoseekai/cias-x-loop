@@ -49,6 +49,7 @@ class WorldModel:
             CREATE TABLE IF NOT EXISTS experiments (
                 experiment_id TEXT PRIMARY KEY,
                 config_json TEXT NOT NULL,
+                config_hash TEXT,
                 status TEXT NOT NULL,
                 api_task_id TEXT,
                 started_at TIMESTAMP,
@@ -124,6 +125,10 @@ class WorldModel:
             CREATE INDEX IF NOT EXISTS idx_analysis_experiments_experiment
             ON analysis_experiments(experiment_id)
         """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_experiments_config_hash
+            ON experiments(config_hash)
+        """)
 
         conn.commit()
         conn.close()
@@ -135,16 +140,22 @@ class WorldModel:
         Args:
             result: Experiment result object
         """
+        from ..agents.planner import ConfigHasher
+
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
 
+        # Compute config hash for deduplication
+        config_hash = ConfigHasher.compute_hash(result.config)
+
         cursor.execute("""
             INSERT OR REPLACE INTO experiments
-            (experiment_id, config_json, status, api_task_id, started_at, completed_at, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            (experiment_id, config_json, config_hash, status, api_task_id, started_at, completed_at, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             result.experiment_id,
             json.dumps(asdict(result.config), cls=EnumEncoder),
+            config_hash,
             result.status,
             result.api_task_id,
             result.started_at,
@@ -212,6 +223,48 @@ class WorldModel:
 
         conn.close()
         return results
+
+    def get_all_config_hashes(self) -> set:
+        """
+        Get all config hashes from the database (efficient for deduplication)
+
+        Returns:
+            Set of config hash strings
+        """
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            SELECT config_hash FROM experiments WHERE config_hash IS NOT NULL
+        """)
+
+        hashes = {row[0] for row in cursor.fetchall()}
+        conn.close()
+
+        logger.debug(f"Retrieved {len(hashes)} config hashes from database")
+        return hashes
+
+    def config_hash_exists(self, config_hash: str) -> bool:
+        """
+        Check if a config hash already exists in the database (efficient for single check)
+
+        Args:
+            config_hash: Config hash to check
+
+        Returns:
+            True if hash exists, False otherwise
+        """
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            SELECT 1 FROM experiments WHERE config_hash = ? LIMIT 1
+        """, (config_hash,))
+
+        exists = cursor.fetchone() is not None
+        conn.close()
+
+        return exists
 
     def save_llm_analysis(
         self,
