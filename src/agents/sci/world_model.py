@@ -11,6 +11,7 @@ from typing import List, Dict, Any, Optional
 from datetime import datetime
 from dataclasses import asdict
 from enum import Enum
+from ...core.world_model_base import WorldModelBase
 
 from loguru import logger
 
@@ -25,7 +26,7 @@ class EnumEncoder(json.JSONEncoder):
         return super().default(obj)
 
 
-class WorldModel:
+class WorldModel(WorldModelBase):
     """World Model - Manages persistent storage of experiment data"""
 
     def __init__(self, db_path: str = "world_model.db"):
@@ -617,3 +618,33 @@ class WorldModel:
 
         conn.close()
         return results
+
+    def update_with_insights(self, insights: Dict[str, Any]):
+        """
+        Update world model with analysis insights.
+        This handles domain-specific saving logic.
+
+        Args:
+            insights: Insights dictionary from AnalysisAgent
+        """
+        # Save Pareto Front
+        pareto_ids = insights.get('pareto_front_ids', [])
+        cycle = insights.get('cycle', 0)
+
+        if pareto_ids:
+            self.save_pareto_front(cycle, pareto_ids)
+
+        # Save LLM Analyses
+        llm_analyses = insights.get('llm_analyses', [])
+        for analysis in llm_analyses:
+            self.save_llm_analysis(
+                cycle,
+                analysis['type'],
+                analysis['prompt'],
+                analysis['response'],
+                analysis['parsed_result'],
+                analysis['model'],
+                analysis['tokens'],
+                related_experiment_ids=analysis.get('related_ids', []),
+                experiment_roles=analysis.get('roles', {})
+            )

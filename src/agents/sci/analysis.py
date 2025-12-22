@@ -40,11 +40,11 @@ class AnalysisAgent(BaseAgent):
         logger.info("Analysis Agent initialized with LLM")
 
     def setup_subscriptions(self):
-        self.bus.subscribe("STATE_UPDATED", self._on_state_updated)
+        self.bus.subscribe("ANALYSIS_REQUESTED", self._on_analysis_requested)
 
-    async def _on_state_updated(self, event: Event):
-        """Handle State Update event"""
-        logger.debug(f"Analysis agent received STATE_UPDATED: {event.payload}")
+    async def _on_analysis_requested(self, event: Event):
+        """Handle Analysis Requested event"""
+        logger.debug(f"Analysis agent received ANALYSIS_REQUESTED: {event.payload}")
         if event.payload.get('trigger_analysis', False):
             cycle = event.payload.get('cycle', 1)
             logger.info(f"Triggering analysis for cycle {cycle}...")
@@ -58,7 +58,7 @@ class AnalysisAgent(BaseAgent):
         logger.info(f"Running analysis for cycle {cycle}")
         pareto_ids, insights = self.analyze(self.world_model, cycle)
 
-        # Publish completion event
+        # Publish completion event with full insights payload
         await self.publish("INSIGHT_GENERATED", {
             "insights": insights,
             "pareto_ids": pareto_ids,
@@ -80,7 +80,7 @@ class AnalysisAgent(BaseAgent):
             cycle_number: Current cycle number
 
         Returns:
-            Tuple[List[str], Dict]: Pareto front IDs and insights
+            Tuple[List[str], Dict]: Pareto front IDs and insights payload
         """
         experiments = world_model.get_all_experiments()
 
@@ -94,37 +94,39 @@ class AnalysisAgent(BaseAgent):
         pareto_ids = self._compute_pareto_front(experiments)
         logger.info(f"Pareto front: {len(pareto_ids)} experiments")
 
+        analysis_records = []
+
         # Step 2: LLM verification
-        verification = self._llm_verify_pareto(
-            experiments, pareto_ids, world_model, cycle_number
+        verification, meta_ver = self._llm_verify_pareto(
+            experiments, pareto_ids, cycle_number
         )
+        if meta_ver:
+            analysis_records.append(meta_ver)
 
         # Step 3: LLM trend analysis
-        trends = self._llm_analyze_trends(
-            experiments, pareto_ids, world_model, cycle_number
+        trends, meta_trends = self._llm_analyze_trends(
+            experiments, pareto_ids, cycle_number
         )
+        if meta_trends:
+            analysis_records.append(meta_trends)
 
         # Step 4: LLM generate recommendations
-        recommendations = self._llm_generate_recommendations(
-            experiments, trends, world_model, cycle_number
+        recommendations, meta_recs = self._llm_generate_recommendations(
+            experiments, trends, cycle_number
         )
+        if meta_recs:
+            analysis_records.append(meta_recs)
 
-        # Save Pareto front with experiment links
-        world_model.save_pareto_front(cycle_number, pareto_ids)
-
-        # Get all experiment IDs for reference
-        all_exp_ids = [e.experiment_id for e in experiments]
-
+        # Construct complete insights payload object to be passed to Director
         insights = {
-            'pareto_front': {
-                'experiment_ids': pareto_ids,
-                'count': len(pareto_ids),
-                'verification': verification
-            },
+            'pareto_front_ids': pareto_ids,
+            'llm_analyses': analysis_records,
+            # Keeping these for easy access if needed by other components
+            'verification': verification,
             'trends': trends,
             'recommendations': recommendations,
             'cycle': cycle_number,
-            'total_experiments_analyzed': len(all_exp_ids)
+            'total_experiments_analyzed': len(experiments)
         }
 
         return pareto_ids, insights
@@ -169,20 +171,11 @@ class AnalysisAgent(BaseAgent):
         self,
         all_exps: List[Any],
         pareto_ids: List[str],
-        world_model: WorldModel,
         cycle: int
-    ) -> Dict[str, Any]:
+    ) -> Tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
         """
         LLM verification of Pareto front
-
-        Args:
-            all_exps: All experiments
-            pareto_ids: Pareto front IDs
-            world_model: World model
-            cycle: Cycle number
-
-        Returns:
-            Verification result dictionary
+        Returns: (verification_result, metadata_record)
         """
         pareto_exps = [e for e in all_exps if e.experiment_id in pareto_ids]
 
@@ -234,38 +227,31 @@ Return JSON format:
             json_content = Utils.extract_json_from_response(response['content'])
             verification = json.loads(json_content)
 
-            # Link Pareto experiments to this analysis
-            world_model.save_llm_analysis(
-                cycle, 'pareto_verification', prompt,
-                response['content'], verification,
-                response['model'], response['tokens'],
-                related_experiment_ids=pareto_ids,
-                experiment_roles={exp_id: 'pareto' for exp_id in pareto_ids}
-            )
+            metadata = {
+                'type': 'pareto_verification',
+                'prompt': prompt,
+                'response': response['content'],
+                'parsed_result': verification,
+                'model': response['model'],
+                'tokens': response['tokens'],
+                'related_ids': pareto_ids,
+                'roles': {exp_id: 'pareto' for exp_id in pareto_ids}
+            }
 
-            return verification
+            return verification, metadata
         except Exception as e:
             logger.error(f"Pareto verification failed: {e}")
-            return {'is_reasonable': True, 'error': str(e)}
+            return {'is_reasonable': True, 'error': str(e)}, None
 
     def _llm_analyze_trends(
         self,
         all_exps: List[Any],
         pareto_ids: List[str],
-        world_model: WorldModel,
         cycle: int
-    ) -> Dict[str, Any]:
+    ) -> Tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
         """
         LLM trend analysis
-
-        Args:
-            all_exps: All experiments
-            pareto_ids: Pareto front IDs
-            world_model: World model
-            cycle: Cycle number
-
-        Returns:
-            Trend analysis results
+        Returns: (trends_result, metadata_record)
         """
         psnrs = [e.metrics.psnr for e in all_exps]
         best_exp = max(all_exps, key=lambda e: e.metrics.psnr)
@@ -293,39 +279,32 @@ Return JSON: {{"key_findings": [], "best_patterns": {{}}, "bottlenecks": []}}"""
             response = self.llm_client.chat(messages, "json")
             trends = json.loads(Utils.extract_json_from_response(response['content']))
 
-            # Link all analyzed experiments to this analysis
             all_exp_ids = [e.experiment_id for e in all_exps]
-            world_model.save_llm_analysis(
-                cycle, 'trend_analysis', prompt,
-                response['content'], trends,
-                response['model'], response['tokens'],
-                related_experiment_ids=all_exp_ids,
-                experiment_roles={exp_id: 'analyzed' for exp_id in all_exp_ids}
-            )
+            metadata = {
+                'type': 'trend_analysis',
+                'prompt': prompt,
+                'response': response['content'],
+                'parsed_result': trends,
+                'model': response['model'],
+                'tokens': response['tokens'],
+                'related_ids': all_exp_ids,
+                'roles': {exp_id: 'analyzed' for exp_id in all_exp_ids}
+            }
 
-            return trends
+            return trends, metadata
         except Exception as e:
             logger.error(f"Trend analysis failed: {e}")
-            return {'error': str(e)}
+            return {'error': str(e)}, None
 
     def _llm_generate_recommendations(
         self,
         all_exps: List[Any],
         trends: Dict[str, Any],
-        world_model: WorldModel,
         cycle: int
-    ) -> Dict[str, Any]:
+    ) -> Tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
         """
         LLM generate experiment recommendations
-
-        Args:
-            all_exps: All experiments
-            trends: Trend analysis results
-            world_model: World model
-            cycle: Cycle number
-
-        Returns:
-            Experiment recommendations
+        Returns: (recommendations_result, metadata_record)
         """
         best_psnr = max([e.metrics.psnr for e in all_exps])
 
@@ -350,17 +329,19 @@ Return JSON: {{"config_suggestions": [], "strategy": "", "expected_improvements"
             response = self.llm_client.chat(messages, "json")
             recommendations = json.loads(Utils.extract_json_from_response(response['content']))
 
-            # Link analyzed experiments to recommendations
             all_exp_ids = [e.experiment_id for e in all_exps]
-            world_model.save_llm_analysis(
-                cycle, 'recommendation', prompt,
-                response['content'], recommendations,
-                response['model'], response['tokens'],
-                related_experiment_ids=all_exp_ids,
-                experiment_roles={exp_id: 'reference' for exp_id in all_exp_ids}
-            )
+            metadata = {
+                'type': 'recommendation',
+                'prompt': prompt,
+                'response': response['content'],
+                'parsed_result': recommendations,
+                'model': response['model'],
+                'tokens': response['tokens'],
+                'related_ids': all_exp_ids,
+                'roles': {exp_id: 'reference' for exp_id in all_exp_ids}
+            }
 
-            return recommendations
+            return recommendations, metadata
         except Exception as e:
             logger.error(f"Recommendation failed: {e}")
-            return {'error': str(e)}
+            return {'error': str(e)}, None

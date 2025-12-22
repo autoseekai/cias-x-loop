@@ -14,16 +14,13 @@ from dotenv import load_dotenv
 # Load environment variables from .env file
 load_dotenv()
 
-from src.core.scientist import (
-    AIScientist,
-    WorldModel,
-    PlannerAgent,
-    ExecutorAgent,
-    AnalysisAgent,
-    PlanReviewerAgent,
-    MessageBus,
-)
-from src.agents.sci.planner import create_baseline_configs
+from src.core.scientist import AIScientist
+from src.core.bus import MessageBus
+from src.agents.sci.world_model import WorldModel
+from src.agents.sci.planner import PlannerAgent, create_baseline_configs
+from src.agents.sci.executor import ExecutorAgent
+from src.agents.sci.analysis import AnalysisAgent
+from src.agents.sci.reviewer import PlanReviewerAgent
 
 
 def load_config(config_path: str) -> dict:

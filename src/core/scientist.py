@@ -8,16 +8,11 @@ Supports async parallel execution of experiments.
 import asyncio
 from typing import List, Dict, Any, Tuple
 from loguru import logger
-import time # Added for time.time()
+import time
 
-from ..agents.sci.structures import SCIConfiguration
-from ..agents.sci.world_model import WorldModel
-from ..agents.sci.planner import PlannerAgent
-from ..agents.sci.executor import ExecutorAgent
-from ..agents.sci.analysis import AnalysisAgent
-from ..agents.sci.reviewer import PlanReviewerAgent
-from ..core.bus import MessageBus, Event
-
+from ..agents.base import BaseAgent
+from .bus import MessageBus, Event
+from .world_model_base import WorldModelBase
 
 class AIScientist:
     """
@@ -30,11 +25,11 @@ class AIScientist:
 
     def __init__(
         self,
-        world_model: WorldModel,
-        planner: PlannerAgent,
-        executor: ExecutorAgent,
-        analyzer: AnalysisAgent,
-        reviewer: PlanReviewerAgent,
+        world_model: WorldModelBase,
+        planner: BaseAgent,
+        executor: BaseAgent,
+        analyzer: BaseAgent,
+        reviewer: BaseAgent,
         bus: MessageBus,
         design_space: Dict[str, Any],
         budget_max: int
@@ -105,7 +100,7 @@ class AIScientist:
             logger.error("Max plan retries reached. Skipping cycle.")
             # Triggers analysis which will eventually trigger insight and next cycle
             await self.bus.publish(Event(
-                "STATE_UPDATED",
+                "ANALYSIS_REQUESTED",
                 {"trigger_analysis": True, "cycle": self.current_cycle},
                 sender="Director"
             ))
@@ -124,25 +119,35 @@ class AIScientist:
             if self.completed_experiments_cycle >= self.expected_experiments and self.expected_experiments > 0:
                 logger.info("All planned experiments completed. Triggering Analysis.")
                 await self.bus.publish(Event(
-                    "STATE_UPDATED",
+                    "ANALYSIS_REQUESTED",
                     {"trigger_analysis": True, "cycle": self.current_cycle},
                     sender="Director"
                 ))
             elif total_done >= self.budget_max:
                 logger.info("Budget exhausted. Forcing Analysis.")
                 await self.bus.publish(Event(
-                    "STATE_UPDATED",
+                    "ANALYSIS_REQUESTED",
                     {"trigger_analysis": True, "cycle": self.current_cycle},
                     sender="Director"
                 ))
 
     async def _on_insight_generated(self, event: Event):
-        """Handle analysis results and decide next step"""
+        """Handle analysis results, save to WorldModel, and decide next step"""
         insights = event.payload.get("insights", {})
         pareto = event.payload.get("pareto_ids", [])
+        cycle = event.payload.get("cycle", self.current_cycle)
 
         self.final_insights = insights
         self.final_pareto = pareto
+
+        # Save Analysis Data to World Model
+        try:
+            if hasattr(self.world_model, 'update_with_insights'):
+                self.world_model.update_with_insights(insights)
+            else:
+                logger.warning("WorldModel does not support update_with_insights")
+        except Exception as e:
+            logger.error(f"Error updating WorldModel with insights: {e}")
 
         budget_used = len(self.world_model.get_all_experiments())
         logger.info(f"Cycle {self.current_cycle} Analysis Complete. Budget: {budget_used}/{self.budget_max}")
@@ -176,7 +181,7 @@ class AIScientist:
 
     async def run_async(
         self,
-        initial_configs: List[SCIConfiguration],
+        initial_configs: List[Any],
         max_cycles: int = 5
     ) -> Tuple[List[str], Dict[str, Any]]:
         """
@@ -207,7 +212,7 @@ class AIScientist:
 
     def run(
         self,
-        initial_configs: List[SCIConfiguration],
+        initial_configs: List[Any],
         max_cycles: int = 5
     ) -> Tuple[List[str], Dict[str, Any]]:
         """
@@ -224,11 +229,13 @@ class AIScientist:
 
     def run_sync(
         self,
-        initial_configs: List[SCIConfiguration],
+        initial_configs: List[Any],
         max_cycles: int = 5
     ) -> Tuple[List[str], Dict[str, Any]]:
         """
         Run AI Scientist main loop (sequential execution, no async)
+
+        Requires agents to implement specific sync methods (plan_experiments, run_experiment, analyze).
 
         Args:
             initial_configs: List of initial experiment configurations
