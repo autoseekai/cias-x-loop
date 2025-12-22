@@ -9,6 +9,10 @@ from pathlib import Path
 
 import yaml
 from loguru import logger
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 from src.sci_scientist import (
     AIScientist,
