@@ -140,3 +140,83 @@ class ReviewResult:
     approved_configs: List[SCIConfiguration]
     feedback: str
     critique: Dict[str, str]  # Map experiment_id to specific critique
+
+
+import json
+import hashlib
+
+class ConfigHasher:
+    """Utility class for computing configuration hashes"""
+
+    @staticmethod
+    def compute_hash(config: SCIConfiguration) -> str:
+        """
+        Compute a hash for a configuration based on its key parameters.
+        Excludes experiment_id and timestamp as they are unique per run.
+
+        Args:
+            config: Experiment configuration
+
+        Returns:
+            SHA256 hash string
+        """
+        # Extract only the parameters that define the experiment
+        hashable_dict = {
+            "forward": {
+                "compression_ratio": config.forward_config.compression_ratio,
+                "mask_type": config.forward_config.mask_type,
+                "sensor_noise": config.forward_config.sensor_noise,
+                "resolution": list(config.forward_config.resolution),
+                "frame_rate": config.forward_config.frame_rate,
+            },
+            "recon": {
+                "family": config.recon_family.value if isinstance(config.recon_family, Enum) else config.recon_family,
+                "num_stages": config.recon_params.num_stages,
+                "num_features": config.recon_params.num_features,
+                "num_blocks": config.recon_params.num_blocks,
+                "learning_rate": config.recon_params.learning_rate,
+                "use_physics_prior": config.recon_params.use_physics_prior,
+                "activation": config.recon_params.activation,
+            },
+            "uq": {
+                "scheme": config.uq_scheme.value if isinstance(config.uq_scheme, Enum) else config.uq_scheme,
+                "params": config.uq_params,
+            },
+            "train": {
+                "batch_size": config.train_config.batch_size,
+                "num_epochs": config.train_config.num_epochs,
+                "optimizer": config.train_config.optimizer,
+                "scheduler": config.train_config.scheduler,
+                "early_stopping": config.train_config.early_stopping,
+            }
+        }
+
+        # Sort keys for consistent hashing
+        json_str = json.dumps(hashable_dict, sort_keys=True)
+        return hashlib.sha256(json_str.encode()).hexdigest()[:16]
+
+    @staticmethod
+    def compute_hash_from_dict(config_dict: Dict[str, Any]) -> str:
+        """
+        Compute hash from a dictionary (e.g., from database)
+
+        Args:
+            config_dict: Configuration dictionary
+
+        Returns:
+            SHA256 hash string
+        """
+        hashable_dict = {
+            "forward": config_dict.get("forward_config", {}),
+            "recon": {
+                "family": config_dict.get("recon_family", ""),
+                **config_dict.get("recon_params", {})
+            },
+            "uq": {
+                "scheme": config_dict.get("uq_scheme", ""),
+                "params": config_dict.get("uq_params", {})
+            },
+            "train": config_dict.get("train_config", {})
+        }
+        json_str = json.dumps(hashable_dict, sort_keys=True)
+        return hashlib.sha256(json_str.encode()).hexdigest()[:16]

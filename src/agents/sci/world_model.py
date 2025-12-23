@@ -7,7 +7,7 @@ Supports linking analyses to specific experiments.
 
 import sqlite3
 import json
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime
 from dataclasses import asdict
 from enum import Enum
@@ -15,7 +15,7 @@ from ...core.world_model_base import WorldModelBase
 
 from loguru import logger
 
-from .structures import ExperimentResult
+from .structures import ExperimentResult, ConfigHasher
 
 
 class EnumEncoder(json.JSONEncoder):
@@ -50,6 +50,7 @@ class WorldModel(WorldModelBase):
             CREATE TABLE IF NOT EXISTS experiments (
                 experiment_id TEXT PRIMARY KEY,
                 config_json TEXT NOT NULL,
+                config_hash TEXT,  -- Added for optimization
                 status TEXT NOT NULL,
                 api_task_id TEXT,
                 started_at TIMESTAMP,
@@ -58,6 +59,17 @@ class WorldModel(WorldModelBase):
                 updated_at TIMESTAMP
             )
         """)
+
+        # Migration: Check if config_hash column exists, if not add it
+        try:
+            cursor.execute("ALTER TABLE experiments ADD COLUMN config_hash TEXT")
+            logger.info("Migrated experiments table: added config_hash column")
+        except sqlite3.OperationalError:
+            # Column already exists
+            pass
+
+        # Create index for config_hash
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_experiments_config_hash ON experiments(config_hash)")
 
         # Metrics table
         cursor.execute("""
@@ -139,13 +151,17 @@ class WorldModel(WorldModelBase):
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
 
+        # Compute config hash
+        config_hash = ConfigHasher.compute_hash(result.config)
+
         cursor.execute("""
             INSERT OR REPLACE INTO experiments
-            (experiment_id, config_json, status, api_task_id, started_at, completed_at, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            (experiment_id, config_json, config_hash, status, api_task_id, started_at, completed_at, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             result.experiment_id,
             json.dumps(asdict(result.config), cls=EnumEncoder),
+            config_hash,
             result.status,
             result.api_task_id,
             result.started_at,
@@ -213,6 +229,229 @@ class WorldModel(WorldModelBase):
 
         conn.close()
         return results
+
+
+    def get_experiments_by_ids(self, experiment_ids: List[str]) -> List[Any]:
+        """
+        Get specific experiments by ID
+        """
+        if not experiment_ids:
+            return []
+
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        placeholders = ','.join(['?'] * len(experiment_ids))
+        cursor.execute(f"""
+            SELECT e.experiment_id, e.config_json, e.status,
+                   m.psnr, m.ssim, m.coverage, m.latency, m.memory, m.training_time
+            FROM experiments e
+            LEFT JOIN metrics m ON e.experiment_id = m.experiment_id
+            WHERE e.experiment_id IN ({placeholders})
+        """, experiment_ids)
+
+        results = []
+        for row in cursor.fetchall():
+            if row[2] == 'success' and row[3] is not None:
+                exp = type('Exp', (), {
+                    'experiment_id': row[0],
+                    'status': row[2],
+                    'metrics': type('Metrics', (), {
+                        'psnr': row[3],
+                        'ssim': row[4],
+                        'coverage': row[5],
+                        'latency': row[6],
+                        'memory': row[7],
+                        'training_time': row[8]
+                    })(),
+                    'config': json.loads(row[1])
+                })()
+                results.append(exp)
+
+        conn.close()
+        return results
+
+    def get_best_experiment(self, metric: str = 'psnr') -> Optional[Any]:
+        """
+        Get the best experiment based on a metric (max value)
+        """
+        allowed_metrics = {'psnr', 'ssim', 'coverage'}
+        if metric not in allowed_metrics:
+            metric = 'psnr'
+
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        cursor.execute(f"""
+            SELECT e.experiment_id, e.config_json, e.status,
+                   m.psnr, m.ssim, m.coverage, m.latency, m.memory, m.training_time
+            FROM experiments e
+            JOIN metrics m ON e.experiment_id = m.experiment_id
+            WHERE e.status = 'success'
+            ORDER BY m.{metric} DESC
+            LIMIT 1
+        """)
+
+        row = cursor.fetchone()
+        conn.close()
+
+        if row:
+            return type('Exp', (), {
+                'experiment_id': row[0],
+                'status': row[2],
+                'metrics': type('Metrics', (), {
+                    'psnr': row[3],
+                    'ssim': row[4],
+                    'coverage': row[5],
+                    'latency': row[6],
+                    'memory': row[7],
+                    'training_time': row[8]
+                })(),
+                'config': json.loads(row[1])
+            })()
+        return None
+
+    def get_top_experiments(self, limit: int = 5, metric: str = 'psnr') -> List[Any]:
+        """
+        Get top K experiments based on a metric (max value)
+        """
+        allowed_metrics = {'psnr', 'ssim', 'coverage'}
+        if metric not in allowed_metrics:
+            metric = 'psnr'
+
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        cursor.execute(f"""
+            SELECT e.experiment_id, e.config_json, e.status,
+                   m.psnr, m.ssim, m.coverage, m.latency, m.memory, m.training_time
+            FROM experiments e
+            JOIN metrics m ON e.experiment_id = m.experiment_id
+            WHERE e.status = 'success'
+            ORDER BY m.{metric} DESC
+            LIMIT ?
+        """, (limit,))
+
+        results = []
+        for row in cursor.fetchall():
+            exp = type('Exp', (), {
+                'experiment_id': row[0],
+                'status': row[2],
+                'metrics': type('Metrics', (), {
+                    'psnr': row[3],
+                    'ssim': row[4],
+                    'coverage': row[5],
+                    'latency': row[6],
+                    'memory': row[7],
+                    'training_time': row[8]
+                })(),
+                'config': json.loads(row[1])
+            })()
+            results.append(exp)
+
+        conn.close()
+        return results
+
+    def get_all_experiment_ids(self) -> List[str]:
+        """Get list of all experiment IDs (lightweight)"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute("SELECT experiment_id FROM experiments WHERE status='success'")
+        ids = [row[0] for row in cursor.fetchall()]
+        conn.close()
+        return ids
+
+    def check_config_exists(self, config_hash: str) -> bool:
+        """
+        Check if a configuration hash already exists in the database.
+
+        Args:
+            config_hash: SHA256 hash of the configuration
+
+        Returns:
+            True if exists, False otherwise
+        """
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        cursor.execute("SELECT 1 FROM experiments WHERE config_hash = ? LIMIT 1", (config_hash,))
+        exists = cursor.fetchone() is not None
+
+        conn.close()
+        return exists
+
+    def count_experiments(self) -> int:
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM experiments")
+        result = cursor.fetchone()
+        conn.close()
+        return result[0]
+
+    def find_pareto_frontier_ids(
+        self,
+        objectives: Optional[List[Tuple[str, str]]] = None
+    ) -> List[str]:
+        """
+        Find Pareto optimal experiment IDs using SQL directly (Computation Push-down).
+
+        Args:
+            objectives: List of tuples (metric_name, direction).
+                       direction must be 'max' or 'min'.
+                       Example: [('psnr', 'max'), ('latency', 'min')]
+                       Defaults to [('psnr', 'max'), ('ssim', 'max')] if None.
+
+        Returns:
+            List of experiment IDs on the Pareto frontier.
+        """
+        if objectives is None:
+            objectives = [('psnr', 'max'), ('ssim', 'max')]
+
+        # Validate columns to prevent SQL injection
+        allowed_metrics = {'psnr', 'ssim', 'coverage', 'latency', 'memory', 'training_time'}
+        for metric, direction in objectives:
+            if metric not in allowed_metrics:
+                raise ValueError(f"Invalid metric: {metric}")
+            if direction not in ['max', 'min']:
+                raise ValueError(f"Invalid direction: {direction}")
+
+        # Build SQL predicates
+        # Condition: t2 dominates t1
+        # 1. t2 is better or equal in all objectives
+        strict_better_clauses = []
+        better_or_equal_clauses = []
+
+        for metric, direction in objectives:
+            if direction == 'max':
+                better_or_equal_clauses.append(f"t2.{metric} >= t1.{metric}")
+                strict_better_clauses.append(f"t2.{metric} > t1.{metric}")
+            else:  # min
+                better_or_equal_clauses.append(f"t2.{metric} <= t1.{metric}")
+                strict_better_clauses.append(f"t2.{metric} < t1.{metric}")
+
+        where_better_or_equal = " AND ".join(better_or_equal_clauses)
+        where_strict_better = " OR ".join(strict_better_clauses)
+
+        # Combine: t2 dominates t1 if (all better_eq) AND (at least one strict better)
+        domination_condition = f"({where_better_or_equal}) AND ({where_strict_better})"
+
+        query = f"""
+            SELECT t1.experiment_id
+            FROM metrics t1
+            WHERE NOT EXISTS (
+                SELECT 1
+                FROM metrics t2
+                WHERE {domination_condition}
+            )
+        """
+
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        try:
+            cursor.execute(query)
+            return [row[0] for row in cursor.fetchall()]
+        finally:
+            conn.close()
 
     def save_llm_analysis(
         self,

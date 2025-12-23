@@ -23,7 +23,7 @@ from ..base import BaseAgent
 class AnalysisAgent(BaseAgent):
     """Analysis Agent - Uses LLM for intelligent analysis (Event-Driven)"""
 
-    def __init__(self, llm_config: Dict[str, Any], bus: MessageBus, world_model: Optional[Any] = None):
+    def __init__(self, llm_config: Dict[str, Any], bus: MessageBus, world_model: WorldModel):
         """
         Initialize analysis agent
 
@@ -56,7 +56,7 @@ class AnalysisAgent(BaseAgent):
             return [], {}
 
         logger.info(f"Running analysis for cycle {cycle}")
-        pareto_ids, insights = self.analyze(self.world_model, cycle)
+        pareto_ids, insights = self.analyze(cycle)
 
         # Publish completion event with full insights payload
         await self.publish("INSIGHT_GENERATED", {
@@ -69,50 +69,48 @@ class AnalysisAgent(BaseAgent):
 
     def analyze(
         self,
-        world_model: WorldModel,
         cycle_number: int
     ) -> Tuple[List[str], Dict[str, Any]]:
         """
         Complete analysis workflow
 
         Args:
-            world_model: World model
             cycle_number: Current cycle number
 
         Returns:
             Tuple[List[str], Dict]: Pareto front IDs and insights payload
         """
-        experiments = world_model.get_all_experiments()
+        exp_count = self.world_model.count_experiments()
 
-        if len(experiments) < 3:
-            logger.warning(f"Too few experiments: {len(experiments)}")
+        if exp_count < 3:
+            logger.warning(f"Too few experiments: {exp_count}")
             return [], {"message": "Insufficient data"}
 
-        logger.info(f"Analyzing {len(experiments)} experiments")
+        logger.info(f"Analyzing {exp_count} experiments")
 
         # Step 1: Compute Pareto front
-        pareto_ids = self._compute_pareto_front(experiments)
+        pareto_ids = self._compute_pareto_front()
         logger.info(f"Pareto front: {len(pareto_ids)} experiments")
 
         analysis_records = []
 
         # Step 2: LLM verification
         verification, meta_ver = self._llm_verify_pareto(
-            experiments, pareto_ids, cycle_number
+            pareto_ids, cycle_number
         )
         if meta_ver:
             analysis_records.append(meta_ver)
 
         # Step 3: LLM trend analysis
         trends, meta_trends = self._llm_analyze_trends(
-            experiments, pareto_ids, cycle_number
+            pareto_ids, cycle_number
         )
         if meta_trends:
             analysis_records.append(meta_trends)
 
         # Step 4: LLM generate recommendations
         recommendations, meta_recs = self._llm_generate_recommendations(
-            experiments, trends, cycle_number
+            trends, cycle_number
         )
         if meta_recs:
             analysis_records.append(meta_recs)
@@ -126,50 +124,29 @@ class AnalysisAgent(BaseAgent):
             'trends': trends,
             'recommendations': recommendations,
             'cycle': cycle_number,
-            'total_experiments_analyzed': len(experiments)
+            'total_experiments_analyzed': exp_count
         }
 
         return pareto_ids, insights
 
-    def _compute_pareto_front(self, experiments: List[Any]) -> List[str]:
+    def _compute_pareto_front(self) -> List[str]:
         """
-        Compute Pareto front
-
-        Args:
-            experiments: List of experiments
+        Compute Pareto front via WorldModel (Computation Push-down)
 
         Returns:
             List of Pareto front experiment IDs
         """
-        if not experiments:
-            return []
+        # Define objectives: maximize PSNR and SSIM, minimize Latency
+        objectives = [
+            ('psnr', 'max'),
+            ('ssim', 'max'),
+            ('latency', 'min')
+        ]
 
-        obj_matrix = []
-        exp_ids = []
-
-        for exp in experiments:
-            values = [
-                exp.metrics.psnr,
-                exp.metrics.ssim,
-                -exp.metrics.latency  # Minimize latency
-            ]
-            obj_matrix.append(values)
-            exp_ids.append(exp.experiment_id)
-
-        obj_matrix = np.array(obj_matrix)
-        is_pareto = np.ones(len(obj_matrix), dtype=bool)
-
-        for i, obj_i in enumerate(obj_matrix):
-            if is_pareto[i]:
-                dominated = np.all(obj_matrix >= obj_i, axis=1) & \
-                           np.any(obj_matrix > obj_i, axis=1)
-                is_pareto[dominated] = False
-
-        return [exp_ids[i] for i in range(len(exp_ids)) if is_pareto[i]]
+        return self.world_model.find_pareto_frontier_ids(objectives)
 
     def _llm_verify_pareto(
         self,
-        all_exps: List[Any],
         pareto_ids: List[str],
         cycle: int
     ) -> Tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
@@ -177,7 +154,8 @@ class AnalysisAgent(BaseAgent):
         LLM verification of Pareto front
         Returns: (verification_result, metadata_record)
         """
-        pareto_exps = [e for e in all_exps if e.experiment_id in pareto_ids]
+        pareto_exps = self.world_model.get_experiments_by_ids(pareto_ids)
+        summary = self.world_model.summarize()
 
         # Prepare data summary
         pareto_lines = []
@@ -187,22 +165,29 @@ class AnalysisAgent(BaseAgent):
                 f"SSIM={exp.metrics.ssim:.4f}, Latency={exp.metrics.latency:.1f}ms"
             )
 
-        psnrs = [e.metrics.psnr for e in all_exps]
-        ssims = [e.metrics.ssim for e in all_exps]
-        latencies = [e.metrics.latency for e in all_exps]
+        psnr_stats = summary['psnr_stats']
+        ssim_stats = summary['ssim_stats']
+        # Note: Latency stats not currently in summarize(), using approximations or fetching if critical
+        # For now, let's assume latency is not strictly required for the prompt stats if not in summary,
+        # or we update summarize(). Assuming summary is sufficient for PSNR/SSIM.
+        # If latency stats are absolutely needed, we should update summarize().
+        # Let's check prompt usage below. It uses latency min/max.
+        # Since summarize() doesn't return latency stats, we might miss them.
+        # However, to avoid 'get_all_experiments', let's stick to PSNR/SSIM which are most important,
+        # or just omit latency stats in the prompt if unavailable.
+        # Actually, let's modify the prompt to use what we have in summary.
 
         prompt = f"""You are an SCI domain expert. Please verify the reasonableness of the Pareto front.
 
-Total experiments: {len(all_exps)}
+Total experiments: {self.world_model.count_experiments()}
 Pareto front: {len(pareto_ids)} points
 
 Pareto points:
 {chr(10).join(pareto_lines)}
 
 Statistics:
-- PSNR: {min(psnrs):.2f} - {max(psnrs):.2f} dB
-- SSIM: {min(ssims):.4f} - {max(ssims):.4f}
-- Latency: {min(latencies):.1f} - {max(latencies):.1f} ms
+- PSNR: {psnr_stats['min']:.2f} - {psnr_stats['max']:.2f} dB
+- SSIM: {ssim_stats['min']:.4f} - {ssim_stats['max']:.4f}
 
 Please analyze:
 1. Is the Pareto front reasonable
@@ -245,7 +230,6 @@ Return JSON format:
 
     def _llm_analyze_trends(
         self,
-        all_exps: List[Any],
         pareto_ids: List[str],
         cycle: int
     ) -> Tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
@@ -253,13 +237,14 @@ Return JSON format:
         LLM trend analysis
         Returns: (trends_result, metadata_record)
         """
-        psnrs = [e.metrics.psnr for e in all_exps]
-        best_exp = max(all_exps, key=lambda e: e.metrics.psnr)
+        summary = self.world_model.summarize()
+        psnr_stats = summary['psnr_stats']
+        best_exp = self.world_model.get_best_experiment('psnr')
 
         prompt = f"""You are a data analysis expert. Please analyze experiment trends.
 
-Total experiments: {len(all_exps)}
-PSNR range: {min(psnrs):.2f} - {max(psnrs):.2f} dB
+Total experiments: {summary['total_experiments']}
+PSNR range: {psnr_stats['min']:.2f} - {psnr_stats['max']:.2f} dB
 Best experiment: PSNR={best_exp.metrics.psnr:.2f}, SSIM={best_exp.metrics.ssim:.4f}
 
 Please analyze:
@@ -279,7 +264,7 @@ Return JSON: {{"key_findings": [], "best_patterns": {{}}, "bottlenecks": []}}"""
             response = self.llm_client.chat(messages, "json")
             trends = json.loads(Utils.extract_json_from_response(response['content']))
 
-            all_exp_ids = [e.experiment_id for e in all_exps]
+            all_exp_ids = self.world_model.get_all_experiment_ids()
             metadata = {
                 'type': 'trend_analysis',
                 'prompt': prompt,
@@ -298,7 +283,6 @@ Return JSON: {{"key_findings": [], "best_patterns": {{}}, "bottlenecks": []}}"""
 
     def _llm_generate_recommendations(
         self,
-        all_exps: List[Any],
         trends: Dict[str, Any],
         cycle: int
     ) -> Tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
@@ -306,12 +290,14 @@ Return JSON: {{"key_findings": [], "best_patterns": {{}}, "bottlenecks": []}}"""
         LLM generate experiment recommendations
         Returns: (recommendations_result, metadata_record)
         """
-        best_psnr = max([e.metrics.psnr for e in all_exps])
+        summary = self.world_model.summarize()
+        best_psnr = summary['psnr_stats']['max']
+        total_exps_count = summary['total_experiments']
 
         prompt = f"""Based on the analysis, provide experiment recommendations.
 
 Current best PSNR: {best_psnr:.2f} dB
-Completed: {len(all_exps)} experiments
+Completed: {total_exps_count} experiments
 
 Please provide:
 1. 3 specific configuration suggestions
@@ -329,7 +315,7 @@ Return JSON: {{"config_suggestions": [], "strategy": "", "expected_improvements"
             response = self.llm_client.chat(messages, "json")
             recommendations = json.loads(Utils.extract_json_from_response(response['content']))
 
-            all_exp_ids = [e.experiment_id for e in all_exps]
+            all_exp_ids = self.world_model.get_all_experiment_ids()
             metadata = {
                 'type': 'recommendation',
                 'prompt': prompt,

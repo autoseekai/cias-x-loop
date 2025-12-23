@@ -22,86 +22,13 @@ from .structures import (
     TrainConfig,
     ReconFamily,
     UQScheme,
+    ConfigHasher,
 )
 from ...llm.client import LLMClient
 from ...agents.utils import Utils
 
 
-class ConfigHasher:
-    """Utility class for computing configuration hashes"""
 
-    @staticmethod
-    def compute_hash(config: SCIConfiguration) -> str:
-        """
-        Compute a hash for a configuration based on its key parameters.
-        Excludes experiment_id and timestamp as they are unique per run.
-
-        Args:
-            config: Experiment configuration
-
-        Returns:
-            SHA256 hash string
-        """
-        # Extract only the parameters that define the experiment
-        hashable_dict = {
-            "forward": {
-                "compression_ratio": config.forward_config.compression_ratio,
-                "mask_type": config.forward_config.mask_type,
-                "sensor_noise": config.forward_config.sensor_noise,
-                "resolution": list(config.forward_config.resolution),
-                "frame_rate": config.forward_config.frame_rate,
-            },
-            "recon": {
-                "family": config.recon_family.value if isinstance(config.recon_family, Enum) else config.recon_family,
-                "num_stages": config.recon_params.num_stages,
-                "num_features": config.recon_params.num_features,
-                "num_blocks": config.recon_params.num_blocks,
-                "learning_rate": config.recon_params.learning_rate,
-                "use_physics_prior": config.recon_params.use_physics_prior,
-                "activation": config.recon_params.activation,
-            },
-            "uq": {
-                "scheme": config.uq_scheme.value if isinstance(config.uq_scheme, Enum) else config.uq_scheme,
-                "params": config.uq_params,
-            },
-            "train": {
-                "batch_size": config.train_config.batch_size,
-                "num_epochs": config.train_config.num_epochs,
-                "optimizer": config.train_config.optimizer,
-                "scheduler": config.train_config.scheduler,
-                "early_stopping": config.train_config.early_stopping,
-            }
-        }
-
-        # Sort keys for consistent hashing
-        json_str = json.dumps(hashable_dict, sort_keys=True)
-        return hashlib.sha256(json_str.encode()).hexdigest()[:16]
-
-    @staticmethod
-    def compute_hash_from_dict(config_dict: Dict[str, Any]) -> str:
-        """
-        Compute hash from a dictionary (e.g., from database)
-
-        Args:
-            config_dict: Configuration dictionary
-
-        Returns:
-            SHA256 hash string
-        """
-        hashable_dict = {
-            "forward": config_dict.get("forward_config", {}),
-            "recon": {
-                "family": config_dict.get("recon_family", ""),
-                **config_dict.get("recon_params", {})
-            },
-            "uq": {
-                "scheme": config_dict.get("uq_scheme", ""),
-                "params": config_dict.get("uq_params", {})
-            },
-            "train": config_dict.get("train_config", {})
-        }
-        json_str = json.dumps(hashable_dict, sort_keys=True)
-        return hashlib.sha256(json_str.encode()).hexdigest()[:16]
 
 
 from ...core.bus import MessageBus, Event
@@ -144,8 +71,7 @@ class PlannerAgent(BaseAgent):
                 logger.warning(f"Failed to initialize LLM client: {e}")
                 self.use_llm = False
 
-        # Track existing config hashes
-        self.existing_hashes: Set[str] = set()
+
 
         logger.info(f"Planner Agent initialized (max {self.max_configs_per_cycle} per cycle, LLM={self.use_llm})")
 
@@ -166,44 +92,26 @@ class PlannerAgent(BaseAgent):
 
         # Pull context from WorldModel
         summary = self.world_model.summarize()
-        existing_experiments = self.world_model.get_all_experiments()
+
 
         # Plan
         configs = self.plan_experiments(
             summary,
             design_space,
             budget,
-            existing_experiments,
             self.world_model
         )
 
         # Publish
         await self.publish("PLAN_PROPOSED", {"configs": configs})
 
-    def set_existing_configs(self, experiments: List[Any]):
-        """
-        Set existing configuration hashes from completed experiments
 
-        Args:
-            experiments: List of completed experiments from WorldModel
-        """
-        self.existing_hashes.clear()
-        for exp in experiments:
-            if hasattr(exp, 'config'):
-                if isinstance(exp.config, dict):
-                    hash_val = ConfigHasher.compute_hash_from_dict(exp.config)
-                else:
-                    hash_val = ConfigHasher.compute_hash(exp.config)
-                self.existing_hashes.add(hash_val)
-
-        logger.info(f"Loaded {len(self.existing_hashes)} existing config hashes")
 
     def plan_experiments(
         self,
         world_summary: Dict[str, Any],
         design_space: Dict[str, List[Any]],
         budget: int,
-        existing_experiments: Optional[List[Any]] = None,
         world_model: Optional[Any] = None
     ) -> List[SCIConfiguration]:
         """
@@ -213,21 +121,19 @@ class PlannerAgent(BaseAgent):
             world_summary: World model summary
             design_space: Design space definition
             budget: Remaining budget
-            existing_experiments: Optional list of existing experiments for deduplication
             world_model: Optional WorldModel for accessing Pareto front and historical analyses
 
         Returns:
             List of new experiment configurations (deduplicated)
         """
         # Update existing hashes if provided
-        if existing_experiments:
-            self.set_existing_configs(existing_experiments)
+
 
         num_configs = min(self.max_configs_per_cycle, budget)
         configs = []
 
         # Gather rich context from WorldModel
-        context = self._gather_planning_context(world_model, existing_experiments)
+        context = self._gather_planning_context(world_model)
 
         if self.use_llm and self.llm_client:
             # Use LLM to generate configs with rich context
@@ -241,9 +147,8 @@ class PlannerAgent(BaseAgent):
         retries = 0
         while len(configs) < num_configs and retries < self.max_dedup_retries * remaining:
             config = self._generate_random_config(design_space)
-            if self._is_unique(config):
+            if self._is_unique(config, configs):
                 configs.append(config)
-                self.existing_hashes.add(ConfigHasher.compute_hash(config))
             retries += 1
 
         logger.info(f"Planned {len(configs)} unique experiments")
@@ -251,15 +156,13 @@ class PlannerAgent(BaseAgent):
 
     def _gather_planning_context(
         self,
-        world_model: Optional[Any],
-        existing_experiments: Optional[List[Any]]
+        world_model: Optional[Any]
     ) -> Dict[str, Any]:
         """
         Gather rich context for LLM planning
 
         Args:
             world_model: WorldModel instance
-            existing_experiments: List of existing experiments
 
         Returns:
             Context dictionary with Pareto front, insights, recommendations
@@ -272,26 +175,19 @@ class PlannerAgent(BaseAgent):
         }
 
         if not world_model:
-            # Fallback: extract from existing experiments
-            if existing_experiments:
-                # Get top 5 by PSNR
-                sorted_exps = sorted(
-                    existing_experiments,
-                    key=lambda e: e.metrics.psnr if hasattr(e, 'metrics') else 0,
-                    reverse=True
-                )[:5]
-
-                for exp in sorted_exps:
-                    if hasattr(exp, 'config') and isinstance(exp.config, dict):
-                        context['best_experiments'].append({
-                            'id': exp.experiment_id,
-                            'psnr': exp.metrics.psnr,
-                            'ssim': exp.metrics.ssim,
-                            'config': exp.config
-                        })
             return context
 
         try:
+            # Get Top 5 experiments for context (Exploitation)
+            best_exps = world_model.get_top_experiments(limit=5, metric='psnr')
+            for exp in best_exps:
+                context['best_experiments'].append({
+                    'id': exp.experiment_id,
+                    'psnr': exp.metrics.psnr,
+                    'ssim': exp.metrics.ssim,
+                    'config': exp.config
+                })
+
             # Get Pareto front details
             pareto_detail = world_model.get_pareto_detail(cycle=1)  # Latest cycle
             for exp in pareto_detail[:5]:  # Top 5
@@ -320,18 +216,29 @@ class PlannerAgent(BaseAgent):
 
         return context
 
-    def _is_unique(self, config: SCIConfiguration) -> bool:
+    def _is_unique(self, config: SCIConfiguration, current_configs: List[SCIConfiguration]) -> bool:
         """
-        Check if configuration is unique (not in existing hashes)
+        Check if configuration is unique (not in DB and not in current batch)
 
         Args:
             config: Configuration to check
+            current_configs: List of currently planned configurations
 
         Returns:
             True if unique, False if duplicate
         """
         hash_val = ConfigHasher.compute_hash(config)
-        return hash_val not in self.existing_hashes
+
+        # Check against current batch first (to avoid DB query if already redundant)
+        for c in current_configs:
+            if ConfigHasher.compute_hash(c) == hash_val:
+                return False
+
+        # Check against DB
+        if self.world_model and self.world_model.check_config_exists(hash_val):
+            return False
+
+        return True
 
     def _llm_generate_configs(
         self,
@@ -368,9 +275,9 @@ Always respond with valid JSON."""},
             # Filter out duplicates
             unique_configs = []
             for config in configs:
-                if self._is_unique(config):
+                # We need to pass previously accepted unique_configs to check against them
+                if self._is_unique(config, unique_configs):
                     unique_configs.append(config)
-                    self.existing_hashes.add(ConfigHasher.compute_hash(config))
                 else:
                     logger.debug(f"Skipping duplicate config from LLM")
 

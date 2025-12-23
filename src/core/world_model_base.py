@@ -9,9 +9,5 @@ class WorldModelBase(ABC):
         pass
 
     @abstractmethod
-    def get_all_experiments(self):
-        pass
-
-    @abstractmethod
     def update_with_insights(self, insights):
         pass
