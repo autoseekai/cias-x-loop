@@ -1,120 +1,176 @@
-# AI Scientist CI
+# AI Scientist CI (Computation Imaging Scientist)
 
-AI Scientist CI is an advanced, automated scientific discovery system designed for the Compressed Imaging (SCI) domain. It leverages a multi-agent architecture orchestrated by a state-driven graph (LangGraph) to autonomously plan, execute, analyze, and refine scientific experiments.
+**AI Scientist CI** represents a significant leap towards autonomous scientific discovery in the field of **Computational Imaging (CI)**. It leverages a sophisticated **multi-agent architecture** orchestrated by **LangGraph** to autonomously plan, execute, analyze, and refine scientific experiments.
 
-## 🚀 Key Features
+Unlike traditional automated machine learning (AutoML) or simple optimization scripts, AI Scientist CI possesses a **closed-loop learning capability**. It can "read" scientific literature to understand constraints, formulate research strategies, execute experiments potentially involving remote hardware, and perform in-depth analysis to generate new scientific insights—all without human intervention.
 
-*   **Autonomous Research Loop**: A fully automated cycle of hypothesis (plan), experiment (execute), and analysis (learn).
-*   **Multi-Agent Architecture**: Specialized agents for planning, reviewing, execution, and analysis.
-*   **State-Driven Workflow**: Uses [LangGraph](https://github.com/langchain-ai/langgraph) for robust, cyclic, and self-correcting workflow orchestration.
-*   **LLM-Powered Insights**: Utilizes Large Language Models (LLMs) for generating experiment configurations, verifying validity, and deriving scientific insights from results.
-*   **Pareto Optimization**: Automatically identifies and refines trade-offs (e.g., Image Quality vs. Reconstruction Speed) using Pareto front analysis.
-*   **Unified Persistence**: Ensures all experiment results and analytical insights are securely persisted to a World Model (SQLite/SQLAlchemy).
+---
 
-## 🛠️ Architecture
+## 🚀 Key Innovation: The "Scientist" Knowledge Loop
 
-The system is built upon a modular architecture where agents act as nodes in a workflow graph. The state flows between these nodes, carrying the context of the current research cycle.
+This project introduces a **Simplified World Model** design that acts as the system's brain, enabling true "Context-Aware Research":
 
-### Agents
+1.  **📚 Learn (Literature Review)**: The **Learning Agent** (powered by **LlamaIndex**) ingests reference documents (PDFs/MDs). It distills unstructured text into structured **Knowledge Capsules**—containing critical constraints ("Learning rate must be < 1e-3") and best practices.
+2.  **🧠 Plan (Strategy Formulation)**: The **Planner Agent** doesn't just guess hyperparameters. It queries the World Model for a **Planning Context**, combining learned literature rules with the results of the best past experiments to propose scientifically grounded experimental designs.
+3.  **🛡️ Review (Safety & Validity)**: The **Reviewer Agent** acts as a strict "Reviewer #2". It validates proposed plans against the explicit rules learned in step 1, ensuring no dangerous or theoretically invalid experiments are run on expensive hardware.
+4.  **🔬 Execute (Experimentation)**: The **Executor Agent** manages the training of SCI reconstruction networks (supporting local execution or remote API for real optical hardware).
+5.  **📈 Analyze (Insight Generation)**: The **Analysis Agent** performs Pareto front analysis and stratified trend analysis. Crucially, it **writes new insights back to the World Model**, allowing the system to "learn from experience" and improve subsequent cycles.
 
-1.  **PlannerAgent (`src/agents/sci/planner.py`)**: Uses LLMs and historical data to propose new experiment configurations. It balances exploration (trying new things) and exploitation (refining best results).
-2.  **PlanReviewerAgent (`src/agents/sci/reviewer.py`)**: Acts as a critic. It validates proposed plans against safety rules and strategic goals, providing feedback to the Planner if revisions are needed.
-3.  **ExecutorAgent (`src/agents/sci/executor.py`)**: Responsible for running experiments. It can interface with a real remote SCI service or run in a local mock mode for testing.
-4.  **AnalysisAgent (`src/agents/sci/analysis.py`)**: Analyzes experiment results to compute statistics, identify Pareto frontiers, and generate high-level scientific insights using LLMs.
+---
 
-### Workflow Graph
+## 🛠️ System Architecture
 
-The core logic is defined in `sci_loop.py` and `src/core/workflow_graph.py`. The workflow follows this high-level topology:
+The core of the system is the **Simplified World Model (SQLite)**, which serves as a shared "Context Generator" for all agents.
 
 ```mermaid
 graph TD
-    Start([Start]) --> Planner
-    Planner --> Reviewer
-    Reviewer -->|Approved| Executor
-    Reviewer -->|Rejected| Planner
-    Executor --> PersistenceResults[Persistence (Results)]
-    PersistenceResults --> Analyzer
-    Analyzer --> PersistenceInsights[Persistence (Insights)]
-    PersistenceInsights -->|Continue Cycle| Planner
-    PersistenceInsights -->|Budget Exhausted| End([End])
+    User[User] --> |Upload Docs & Goal| NodeLearner[Learning Node]
+
+    subgraph "Knowledge Loop"
+    NodeLearner --> |Ingest & Index| Learner[Learning Agent]
+    Learner --> |Save Rules & Insights| WM[(World Model\nSQLite)]
+    end
+
+    subgraph "Experiment Loop (LangGraph)"
+    NodeLearner --> NodePlanner[Planner Node]
+
+    WM --> |Get Context\n(Rules + Best Exps)| NodePlanner
+    NodePlanner --> |Propose Configs| Planner[Planner Agent]
+
+    Planner --> NodeReviewer[Reviewer Node]
+    WM --> |Get Validation Rules| NodeReviewer
+    NodeReviewer --> |Approve/Reject| Reviewer[Reviewer Agent]
+
+    Reviewer --> |If Approved| NodeExecutor[Executor Node]
+    Reviewer --> |If Rejected| NodePlanner
+
+    NodeExecutor --> |Run Experiments| Executor[Executor Agent]
+    Executor --> |Save Results| WM
+
+    NodeExecutor --> NodeAnalyzer[Analyzer Node]
+    NodeAnalyzer --> |Fetch Data| Analyzer[Analysis Agent]
+    Analyzer --> |Save New Insights| WM
+
+    NodeAnalyzer --> |Next Cycle| NodePlanner
+    end
 ```
 
-1.  **Planning**: The `Planner` proposes a batch of experiments.
-2.  **Review**: The `Reviewer` checks the plan. If rejected, it loops back to `Planner` with feedback.
-3.  **Execution**: Approved plans are executed by the `Executor` (async/parallel).
-4.  **Persistence (Results)**: Raw experiment results are saved to the World Model.
-5.  **Analysis**: The `Analyzer` processes results, updating the Pareto front and generating insights.
-6.  **Persistence (Insights)**: Analysis insights are saved.
-7.  **Loop/Terminate**: The system checks the budget. If remaining, it starts a new cycle; otherwise, it terminates.
+### Core Components
+
+1.  **World Model (`src/agents/sci/world_model.py`)**:
+    *   **Technology**: SQLite (Pure Python, no external DB required).
+    *   **Function**: Stores `knowledge_capsules` (Rules, Insights), `experiments` (Configs, Metrics), and `llm_analyses`.
+    *   **Key Capability**: `get_planning_context()` generates a token-optimized prompt summary for the Planner.
+
+2.  **Learning Agent (`src/agents/sci/learner.py`)**:
+    *   **Technology**: **LlamaIndex RAG**.
+    *   **Function**: Reads scientific papers/documentation and extracts structured rules (e.g., "Use Adam optimizer for non-convex problems").
+
+3.  **Planner Agent (`src/agents/sci/planner.py`)**:
+    *   **Function**: Context-aware experiment design. Uses a **Meta-Prompting** strategy (propose strategy first, then configs) to improve quality.
+
+4.  **Reviewer Agent (`src/agents/sci/reviewer.py`)**:
+    *   **Function**: Rules-based and LLM-based safety checks. prevents "hallucinated" parameters.
+
+5.  **Analysis Agent (`src/agents/sci/analysis.py`)**:
+    *   **Function**: Computes Pareto frontiers (e.g., PSNR vs. Latency) and identifies trends (e.g., "Higher compression requires deeper networks").
+
+---
 
 ## 📂 Project Structure
 
 ```
-├── config/
-│   └── default.yaml         # Configuration for agents, LLMs, and experiments
-├── sci_loop.py              # Main entry point for the application
+├── config/              # Configuration files
+├── docs/                # Documentation
+├── sci_loop.py          # Main entry point
 ├── src/
-│   ├── agents/              # Agent implementations
-│   │   ├── base.py          # Base Agent class
-│   │   ├── sci/             # SCI-domain specific agent logic
-│   │   │   ├── planner.py   # PlannerAgent
-│   │   │   ├── reviewer.py  # PlanReviewerAgent
-│   │   │   ├── executor.py  # ExecutorAgent
-│   │   │   ├── analysis.py  # AnalysisAgent
-│   │   │   ├── world_model.py # Data access layer (WorldModel)
-│   │   │   └── structures.py # Data classes (ExperimentResult, SCIConfiguration, etc.)
-│   ├── core/                # Core framework components
-│   │   ├── workflow_graph.py # LangGraph node wrappers and builder
-│   │   ├── state.py          # Global AgentState definition
-│   │   └── world_model_base.py # Abstract base class for World Models
-│   └── llm/                 # LLM client utilities
-└── pyproject.toml           # Project dependencies
+│   ├── agents/
+│   │   ├── core/        # Abstract Base Classes (Generic for any Domain)
+│   │   │   └── abstract_agents.py
+│   │   ├── sci/         # SCI Domain Implementation
+│   │   │   ├── learner.py     # LlamaIndex Document Learner
+│   │   │   ├── planner.py     # Context-Aware Planner
+│   │   │   ├── reviewer.py    # Rule-Based Reviewer
+│   │   │   ├── executor.py    # Experiment Executor
+│   │   │   ├── analysis.py    # Insight Generator
+│   │   │   ├── world_model.py # SQLite Database Manager
+│   │   │   └── structures.py  # Pydantic Data Models
+│   │   └── base.py
+│   ├── core/            # Framework Core
+│   │   ├── workflow_graph.py  # LangGraph Topology
+│   │   └── state.py           # Global State Schema
+│   └── llm/             # LLM Client (OpenAI/LiteLLM)
+└── data/                # Default storage for DB and vectors
 ```
+
+---
 
 ## 🚦 Getting Started
 
 ### Prerequisites
 
-*   Python 3.12+
-*   `uv` (recommended) or `pip`
-*   OpenAI API Key (or compatible) for LLM features
+*   **Python 3.10+** (Tested on 3.12)
+*   **OpenAI API Key** (or compatible endpoint)
+*   Optional: `uv` for fast package management
 
-### Installation
+### 1. Installation
 
 ```bash
+# Clone the repository
+git clone https://github.com/your-repo/ai-scientist-ci.git
+cd ai-scientist-ci
+
 # Install dependencies
+# Using pip:
+pip install -r requirements.txt
+# OR using uv (recommended):
 uv sync
-# OR
-pip install -r requirements.txt # (if generated)
 ```
 
-### Configuration
+### 2. Configuration
 
-Edit `config/default.yaml` to set your preferences, such as:
-*   `llm`: API key and model selection.
-*   `experiment`: Budget and cycle limits.
-*   `executor`: Mock mode vs. real service URL.
-
-### Running
-
-Run the main loop:
+Set up your environment variables (create a `.env` file):
 
 ```bash
-# Run with default settings (Mock mode enabled by default in config)
-python sci_loop.py
+OPENAI_API_KEY=sk-your-key-here
+# Optional: Model selection
+OPENAI_MODEL_NAME=gpt-4-turbo
+```
 
-# Run with specific budget and cycles
+Check `config/default.yaml` for system settings (budgets, cycle counts).
+
+### 3. Usage
+
+**Basic Run (No learning files, pure exploration):**
+```bash
 python sci_loop.py --budget 10 --cycles 3
-
-# Run against real service (disable mock)
-python sci_loop.py --no-mock
 ```
 
-## 🧪 Mock Service
-
-A mock service is included (`mock_service.py`) to simulate the SCI training API for local development and testing without GPU resources.
-
-```bash
-# Start the mock service
-uv run python mock_service.py
+**Full "Scientist" Run (With Document Learning):**
+Place your reference papers (PDF/MD) in a folder (e.g., `papers/`) and run:
+```python
+# (In python script or extended CLI - see sci_loop.py)
+python sci_loop.py --docs ./papers/ --goal "Maximize reconstruction PSNR for compression ratio > 16"
 ```
+
+---
+
+## 🌐 Extending to Other Domains
+
+This framework is designed for **General Purpose Automated Science**. To adapt it to a new domain (e.g., **MRI**, **Biology**, **Materials Science**):
+
+1.  **Define Configuration**: Create a new `Pydantic` model for your experiment parameters in a new `structures.py`.
+2.  **Implement Agents**: Inherit from the abstract classes in `src/agents/core/abstract_agents.py`.
+    *   `class MRIPlanner(AbstractPlannerAgent[MRIConfig]): ...`
+    *   `class MRIExecutor(AbstractExecutorAgent[MRIConfig, MRIResult]): ...`
+3.  **Reuse Core**: The `LearningAgent`, `WorldModel` (with minor schema tweaks), and `LangGraph` workflow remain largely unchanged!
+
+---
+
+## 🤝 Contributing
+
+We welcome contributions! Please see `CONTRIBUTING.md` for details on how to submit Pull Requests.
+
+## 📄 License
+
+MIT License

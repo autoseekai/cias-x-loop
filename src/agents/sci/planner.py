@@ -30,8 +30,11 @@ from ...llm.client import LLMClient
 from ...agents.utils import Utils
 
 from ..base import BaseAgent
+from ..core.abstract_agents import AbstractPlannerAgent
 
-class PlannerAgent(BaseAgent):
+
+class PlannerAgent(AbstractPlannerAgent[SCIConfiguration]):
+
     """LLM-driven experiment planning agent with deduplication"""
 
     def __init__(self, config: Dict[str, Any], llm_client: LLMClient, world_model: WorldModel):
@@ -55,7 +58,9 @@ class PlannerAgent(BaseAgent):
         world_summary: Dict[str, Any],
         design_space: Dict[str, List[Any]],
         budget: int,
-        feedback: str = ""
+        feedback: str = "",
+        strategy: str = "",
+        knowledge_context: str = ""
     ) -> List[SCIConfiguration]:
         """
         Plan new experiments using LLM with rich context
@@ -80,7 +85,7 @@ class PlannerAgent(BaseAgent):
         if self.use_llm and self.llm_client:
             # Use LLM to generate configs with rich context
             llm_configs = self._llm_generate_configs(
-                world_summary, design_space, num_configs, context, feedback
+                world_summary, design_space, num_configs, context, feedback, strategy, knowledge_context
             )
             configs.extend(llm_configs)
 
@@ -182,7 +187,9 @@ class PlannerAgent(BaseAgent):
         design_space: Dict[str, List[Any]],
         num_configs: int,
         context: Optional[Dict[str, Any]] = None,
-        feedback: str = ""
+        feedback: str = "",
+        strategy: str = "",
+        knowledge_context: str = ""
     ) -> List[SCIConfiguration]:
         """
         Use LLM to generate experiment configurations with rich context
@@ -196,7 +203,7 @@ class PlannerAgent(BaseAgent):
         Returns:
             List of generated configurations
         """
-        prompt = self._build_planning_prompt(world_summary, design_space, num_configs, context, feedback)
+        prompt = self._build_planning_prompt(world_summary, design_space, num_configs, context, feedback, strategy, knowledge_context)
 
         messages = [
             {"role": "system", "content": """You are an expert in computational imaging and SCI (Snapshot Compressive Imaging) reconstruction.
@@ -231,7 +238,9 @@ Always respond with valid JSON."""},
         design_space: Dict[str, List[Any]],
         num_configs: int,
         context: Optional[Dict[str, Any]] = None,
-        feedback: str = ""
+        feedback: str = "",
+        strategy: str = "",
+        knowledge_context: str = ""
     ) -> str:
         """Build the prompt for LLM planning with rich context"""
 
@@ -294,13 +303,28 @@ The previous plan was rejected. You MUST fix the following issues:
 {feedback}
 """
 
+        # Build Strategy Section
+        strategy_section = ""
+        if strategy:
+            strategy_section = f"""
+## Research Strategy (GUIDING PRINCIPLE)
+{strategy}
+"""
+
+        # Build Knowledge Context Section (from Learning Agent)
+        knowledge_section = ""
+        if knowledge_context:
+            knowledge_section = f"""
+{knowledge_context}
+"""
+
         prompt = f"""Based on the current experiment progress, suggest {num_configs} new experiment configurations.
 
 ## Current Progress
 - Total completed experiments: {world_summary.get('total_experiments', 0)}
 - PSNR stats: avg={world_summary.get('psnr_stats', {}).get('avg', 0):.2f}, max={world_summary.get('psnr_stats', {}).get('max', 0):.2f}, min={world_summary.get('psnr_stats', {}).get('min', 0):.2f} dB
 - SSIM stats: avg={world_summary.get('ssim_stats', {}).get('avg', 0):.4f}, max={world_summary.get('ssim_stats', {}).get('max', 0):.4f}
-{pareto_section}{insights_section}{recommendations_section}{feedback_section}
+{pareto_section}{insights_section}{recommendations_section}{feedback_section}{strategy_section}{knowledge_section}
 ## Design Space (choose values from these options ONLY)
 - compression_ratios: {design_space.get('compression_ratios', [8, 16, 24])}
 - mask_types: {design_space.get('mask_types', ['random', 'optimized'])}
@@ -531,6 +555,45 @@ Return ONLY a valid JSON object (no markdown code blocks) with this structure:
         )
 
         return config
+
+    def _generate_dynamic_strategy(
+        self,
+        world_summary: Dict[str, Any],
+        context: Dict[str, Any]
+    ) -> str:
+        """
+        Generate a high-level research strategy (Meta-Prompting).
+        """
+        prompt = f"""
+        You are a Principal Investigator (PI) leading a research on Snapshot Compressive Imaging (SCI).
+
+        Current Status:
+        - Total Experiments: {world_summary.get('total_experiments', 0)}
+        - Best PSNR: {world_summary.get('psnr_stats', {}).get('max', 0)}
+        - Average PSNR: {world_summary.get('psnr_stats', {}).get('avg', 0)}
+
+        Recent Insights:
+        {json.dumps(context.get('historical_insights', []), indent=2)}
+
+        Propose a high-level strategy for the next batch of experiments.
+        Focus on either:
+        1. Exploitation: Refine the best performing configurations.
+        2. Exploration: Try unexplored regions of the design space.
+
+        Keep it concise (1-2 sentences).
+        """
+
+        if self.use_llm:
+            try:
+                response = self.llm_client.chat([
+                    {"role": "system", "content": "You are a strategic AI researcher."},
+                    {"role": "user", "content": prompt}
+                ])
+                return response['content']
+            except Exception as e:
+                logger.error(f"Strategy generation failed: {e}")
+                return "Focus on improving PSNR by exploring variations of the best current models."
+        return "Focus on exploration."
 
 
 def create_baseline_configs(design_space: Dict[str, List[Any]]) -> List[SCIConfiguration]:

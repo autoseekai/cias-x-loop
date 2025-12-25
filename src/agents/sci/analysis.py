@@ -16,9 +16,13 @@ from .world_model import WorldModel
 from ...agents.utils import Utils
 
 from ..base import BaseAgent
+from ..core.abstract_agents import AbstractAnalysisAgent
+from .structures import ExperimentResult, Insight, Rule, LearnedKnowledge
 
 
-class AnalysisAgent(BaseAgent):
+
+class AnalysisAgent(AbstractAnalysisAgent[ExperimentResult]):
+
     """Analysis Agent - Uses LLM for intelligent analysis"""
 
     def __init__(self, llm_client: LLMClient, world_model: WorldModel):
@@ -39,13 +43,19 @@ class AnalysisAgent(BaseAgent):
             return [], {}
 
         logger.info(f"Running analysis for cycle {cycle}")
-        pareto_ids, insights = self.analyze(cycle)
+        # Fetch dummy data to satisfy abstract interface for now, or let analyze handle it via WorldModel
+        # Since analyze uses world_model internally, we can pass empty structures
+        current_results = []
+        history_summary = {}
+        pareto_ids, insights = self.analyze(current_results, history_summary, cycle)
 
         return pareto_ids, insights
 
     def analyze(
         self,
-        cycle_number: int
+        current_results: List[ExperimentResult],
+        history_summary: Dict[str, Any],
+        cycle: int
     ) -> Tuple[List[str], Dict[str, Any]]:
         """
         Complete analysis workflow (Algorithm 5 Implementation)
@@ -127,21 +137,21 @@ class AnalysisAgent(BaseAgent):
 
         # Step 3: LLM Trend Analysis (Enhanced with Strata)
         trends, meta_trends = self._llm_analyze_trends(
-            pareto_ids, cycle_number, strata_trends
+            pareto_ids, cycle, strata_trends
         )
         if meta_trends:
             analysis_records.append(meta_trends)
 
         # Step 4: Verification (using Global Pareto)
         verification, meta_ver = self._llm_verify_pareto(
-            pareto_ids, cycle_number
+            pareto_ids, cycle
         )
         if meta_ver:
             analysis_records.append(meta_ver)
 
         # Step 5: Recommendations
         recommendations, meta_recs = self._llm_generate_recommendations(
-            trends, cycle_number
+            trends, cycle
         )
         if meta_recs:
             analysis_records.append(meta_recs)
@@ -153,9 +163,34 @@ class AnalysisAgent(BaseAgent):
             'verification': verification,
             'trends': trends,
             'recommendations': recommendations,
-            'cycle': cycle_number,
+            'cycle': cycle,
             'total_experiments_analyzed': exp_count
         }
+
+        # Save to World Model as LearnedKnowledge
+        learned_knowledge = LearnedKnowledge()
+
+        # 1. Convert Trends/Findings to Insights
+        if trends and 'key_findings' in trends:
+            for finding in trends['key_findings']:
+                learned_knowledge.insights.append(Insight(
+                    title="Trend Analysis",
+                    description=finding,
+                    evidence_ids=pareto_ids[:5] # Evidence from Pareto
+                ))
+
+        # 2. Convert Recommendations to Suggestions
+        if recommendations and 'config_suggestions' in recommendations:
+            for rec in recommendations['config_suggestions']:
+                rec_str = str(rec) if isinstance(rec, (dict, list)) else rec
+                learned_knowledge.suggestions.append(Rule(
+                    description=rec_str,
+                    source="AnalysisAgent",
+                    priority="recommended"
+                ))
+
+        if self.world_model:
+            self.world_model.save_learned_knowledge(learned_knowledge)
 
         return pareto_ids, insights
 

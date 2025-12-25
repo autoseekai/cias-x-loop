@@ -7,6 +7,7 @@ Contains core data classes for SCI experiment configuration, metrics, and result
 from dataclasses import dataclass, asdict
 from typing import List, Dict, Any, Optional, Tuple
 from enum import Enum
+from pydantic import BaseModel, Field
 
 
 class ReconFamily(Enum):
@@ -218,5 +219,27 @@ class ConfigHasher:
             },
             "train": config_dict.get("train_config", {})
         }
+
         json_str = json.dumps(hashable_dict, sort_keys=True)
         return hashlib.sha256(json_str.encode()).hexdigest()[:16]
+
+
+class Rule(BaseModel):
+    """A learned rule or constraint"""
+    description: str
+    source: str
+    priority: str = "recommended"  # critical, recommended, optional
+
+
+class Insight(BaseModel):
+    """An analytical insight"""
+    title: str
+    description: str
+    evidence_ids: List[str] = Field(default_factory=list)
+
+
+class LearnedKnowledge(BaseModel):
+    """Container for knowledge distilled by the Learning Agent"""
+    rules: List[Rule] = Field(default_factory=list)
+    suggestions: List[Rule] = Field(default_factory=list)
+    insights: List[Insight] = Field(default_factory=list)

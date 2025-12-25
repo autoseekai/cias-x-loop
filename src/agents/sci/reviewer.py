@@ -16,9 +16,12 @@ from ...llm.client import LLMClient
 from .world_model import WorldModel
 
 from ..base import BaseAgent
+from ..core.abstract_agents import AbstractReviewerAgent
 
 
-class PlanReviewerAgent(BaseAgent):
+
+class PlanReviewerAgent(AbstractReviewerAgent[SCIConfiguration, ReviewResult]):
+
     """Agent for reviewing and validating experiment plans"""
 
     def __init__(self, design_space: Dict[str, Any], llm_client: LLMClient, world_model: WorldModel):
@@ -38,7 +41,8 @@ class PlanReviewerAgent(BaseAgent):
     async def review_plan(
         self,
         proposed_configs: List[SCIConfiguration],
-        context: Dict[str, Any]
+        context: Dict[str, Any],
+        validation_rules: Optional[List[str]] = None
     ) -> ReviewResult:
         """
         Review a list of proposed experiment configurations
@@ -74,7 +78,7 @@ class PlanReviewerAgent(BaseAgent):
 
         # Stage 2: LLM-based Strategic Review
         try:
-            llm_result = await self._llm_review(valid_configs, context)
+            llm_result = await self._llm_review(valid_configs, context, validation_rules)
 
             # Merge rule rejections into final critique
             final_critique = {**rule_rejections, **llm_result['critique']}
@@ -139,12 +143,13 @@ class PlanReviewerAgent(BaseAgent):
     async def _llm_review(
         self,
         configs: List[SCIConfiguration],
-        context: Dict[str, Any]
+        context: Dict[str, Any],
+        validation_rules: Optional[List[str]] = None
     ) -> Dict[str, Any]:
         """
         Ask LLM to review the scientific validity and strategy
         """
-        prompt = self._build_review_prompt(configs, context)
+        prompt = self._build_review_prompt(configs, context, validation_rules)
 
         messages = [
             {"role": "system", "content": """You are a Senior Reviewer for scientific experiments in Snapshot Compressive Imaging.
@@ -168,7 +173,12 @@ You are skeptical and prioritize resource efficiency."""},
                 "critique": {}
             }
 
-    def _build_review_prompt(self, configs: List[SCIConfiguration], context: Dict[str, Any]) -> str:
+    def _build_review_prompt(
+        self,
+        configs: List[SCIConfiguration],
+        context: Dict[str, Any],
+        validation_rules: Optional[List[str]] = None
+    ) -> str:
         """Build the prompt for the LLM reviewer"""
 
         # Format the configs for the prompt
@@ -187,7 +197,12 @@ Experiment ID: {cfg.experiment_id}
         cycle = context.get('cycle', '?')
         best_psnr = context.get('best_psnr', 'N/A')
 
+        rules_section = ""
+        if validation_rules:
+            rules_section = "\n**Learned Validation Rules (MUST COMPLY):**\n" + "\n".join([f"- {r}" for r in validation_rules]) + "\n"
+
         return f"""
+{rules_section}
 **Review Task**
 Please review the following proposed experiments for Cycle {cycle}.
 Current Best PSNR: {best_psnr} dB.

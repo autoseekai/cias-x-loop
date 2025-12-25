@@ -15,7 +15,7 @@ from ...core.world_model_base import WorldModelBase
 
 from loguru import logger
 
-from .structures import ExperimentResult, ConfigHasher
+from .structures import ExperimentResult, ConfigHasher, LearnedKnowledge, Rule
 
 
 class EnumEncoder(json.JSONEncoder):
@@ -136,6 +136,19 @@ class WorldModel(WorldModelBase):
         cursor.execute("""
             CREATE INDEX IF NOT EXISTS idx_analysis_experiments_experiment
             ON analysis_experiments(experiment_id)
+        """)
+
+        # Knowledge Capsules table (from Learning Agent)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS knowledge_capsules (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                category TEXT NOT NULL,  -- 'rule', 'suggestion', 'insight'
+                content TEXT NOT NULL,
+                priority TEXT,
+                source TEXT,
+                tags_json TEXT,
+                created_at TIMESTAMP
+            )
         """)
 
         conn.commit()
@@ -766,6 +779,92 @@ class WorldModel(WorldModelBase):
         conn.close()
         logger.info(f"Pareto front saved: {len(pareto_experiment_ids)} experiments for cycle {cycle}")
 
+
+    def save_learned_knowledge(self, knowledge: LearnedKnowledge):
+        """
+        Save distilled knowledge into knowledge_capsules.
+        """
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        created_at = datetime.now().isoformat()
+
+        # 1. Save Rules
+        for rule in knowledge.rules:
+            cursor.execute("""
+                INSERT INTO knowledge_capsules (category, content, source, priority, created_at)
+                VALUES (?, ?, ?, ?, ?)
+            """, ("rule", rule.description, rule.source, rule.priority, created_at))
+
+        # 2. Save Suggestions
+        for sugg in knowledge.suggestions:
+            cursor.execute("""
+                INSERT INTO knowledge_capsules (category, content, source, priority, created_at)
+                VALUES (?, ?, ?, ?, ?)
+            """, ("suggestion", sugg.description, sugg.source, sugg.priority, created_at))
+
+        # 3. Save Insights
+        for ins in knowledge.insights:
+             cursor.execute("""
+                INSERT INTO knowledge_capsules (category, content, source, priority, tags_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, ("insight", ins.description, "analysis", "insight", json.dumps(ins.evidence_ids), created_at))
+
+        conn.commit()
+        conn.close()
+        logger.info(f"Saved {len(knowledge.rules)} rules and {len(knowledge.suggestions)} suggestions.")
+
+    def get_planning_context(self) -> str:
+        """
+        Generate a compact context string for the Planner.
+        Combines critical rules, best experiments, and recent insights.
+        """
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        # 1. Critical/Recommended Rules
+        cursor.execute("SELECT content, priority FROM knowledge_capsules WHERE category='rule'")
+        rules = cursor.fetchall()
+
+        # 2. Insights
+        cursor.execute("SELECT content FROM knowledge_capsules WHERE category='insight' ORDER BY created_at DESC LIMIT 5")
+        insights = cursor.fetchall()
+
+        # 3. Best Experiments (Top 3 PSNR)
+        best_exps = self.get_top_experiments(limit=3, metric='psnr')
+
+        conn.close()
+
+        context_lines = []
+
+        if rules:
+            context_lines.append("## Learned Constraints & Rules")
+            for r, p in rules:
+                prefix = "[CRITICAL]" if p == 'critical' else ""
+                context_lines.append(f"- {prefix} {r}")
+
+        if insights:
+            context_lines.append("\n## Recent Insights")
+            for (ins,) in insights:
+                context_lines.append(f"- {ins}")
+
+        if best_exps:
+            context_lines.append("\n## Best Performing Configurations")
+            for exp in best_exps:
+                context_lines.append(f"- PSNR: {exp.metrics.psnr:.2f} | Config: {json.dumps(exp.config)}")
+
+        return "\n".join(context_lines)
+
+    def get_validation_rules(self) -> List[str]:
+        """
+        Get all critical/recommended rules for the Reviewer.
+        """
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute("SELECT content FROM knowledge_capsules WHERE category='rule'")
+        rows = cursor.fetchall()
+        conn.close()
+        return [r[0] for r in rows]
     def get_pareto_history(self, limit: int = 10) -> List[Dict]:
         """
         Get Pareto front history grouped by cycle

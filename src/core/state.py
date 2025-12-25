@@ -9,6 +9,8 @@ class AgentState(TypedDict):
     # Static / Read-only
     design_space: Dict[str, Any]
     budget_remaining: int
+    doc_paths: List[str] # For Learning Agent
+    goal: str
 
     # Planner & Reviewer State
     current_plan: List[Any]  # Proposed experiments for current cycle

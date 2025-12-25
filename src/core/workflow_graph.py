@@ -36,6 +36,22 @@ class BaseNode:
 
 # --- Concrete Node Implementations ---
 
+class LearningNode(BaseNode):
+    async def __call__(self, state: AgentState) -> Dict[str, Any]:
+        logger.info("--- Node: Learning ---")
+        doc_paths = state.get("doc_paths", [])
+        goal = state.get("goal", "optimize performance")
+
+        if doc_paths:
+            logger.info(f"Learning from {len(doc_paths)} documents...")
+            self.agent.learn(doc_paths, goal)
+            logger.info("Learning complete. Knowledge distilled.")
+        else:
+            logger.info("No documents provided for learning.")
+
+        return {"status": "planning"}
+
+
 class PlannerNode(BaseNode):
     async def __call__(self, state: AgentState) -> Dict[str, Any]:
         cycle = state.get("cycle", 1)
@@ -52,11 +68,25 @@ class PlannerNode(BaseNode):
 
         summary = self.agent.world_model.summarize()
 
+        # 1. Get Knowledge Context (Rules/Suggestions)
+        knowledge_context = self.agent.world_model.get_planning_context()
+
+        # 2. Generate Strategy
+        # We need a context dict for strategy generation (insights etc).
+        # Planner has _gather_planning_context but it is internal.
+        # We can rely on Planner._gather_planning_context inside plan_experiments,
+        # but _generate_dynamic_strategy needs it.
+        # Let's verify if we can call it.
+        ctx = self.agent._gather_planning_context()
+        strategy = self.agent._generate_dynamic_strategy(summary, ctx)
+
         configs = self.agent.plan_experiments(
             world_summary=summary,
             design_space=design_space,
             budget=budget,
-            feedback=feedback
+            feedback=feedback,
+            strategy=strategy,
+            knowledge_context=knowledge_context
         )
 
         return {
@@ -77,7 +107,10 @@ class ReviewerNode(BaseNode):
             "cycle": state.get("cycle", 1),
         }
 
-        review_result = await self.agent.review_plan(configs, context)
+        # Get Validation Rules
+        rules = self.agent.world_model.get_validation_rules()
+
+        review_result = await self.agent.review_plan(configs, context, validation_rules=rules)
 
         if review_result.approved:
             logger.info(f"Plan APPROVED ({len(review_result.approved_configs)} configs)")
@@ -137,14 +170,12 @@ class PersistenceNode(BaseNode):
                 # Clear the batch so we don't re-persist
                 updates["last_batch_results"] = []
 
-            # 2. Persist Insights
+            # 2. Persist Insights (Handled by AnalysisAgent internal save)
             new_insights = state.get("new_insights", None)
             if new_insights:
-                logger.info("Persisting Analysis Insights to World Model")
-                wm.update_with_insights(new_insights)
-                # Clear flag/data
+                # Agent already saved to DB.
+                # Just clear state flags.
                 updates["new_insights"] = None
-                # Also ensure they are in the main state if not already
                 updates["insights"] = new_insights
 
         else:
