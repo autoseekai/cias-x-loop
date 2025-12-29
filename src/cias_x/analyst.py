@@ -247,7 +247,11 @@ Output the summary text only (no JSON, no markdown, no bullet points - just a fl
 
     def _update_global_summary(self, design_id: int, old_summary: str, since_plan_id: int, current_plan_id: int) -> tuple[str, int]:
         """Generate and save updated global summary."""
-        recent_summaries = self.world_model.get_plan_summaries_since(design_id, since_plan_id if since_plan_id else current_plan_id)
+        recent_summaries = ''
+        if since_plan_id:
+            recent_summaries = self.world_model.get_plan_summaries_since(design_id, since_plan_id)
+        else:
+            recent_summaries = self.world_model.get_latest_plan_summary(design_id)
 
         if not self.llm_client:
             return old_summary, 0
