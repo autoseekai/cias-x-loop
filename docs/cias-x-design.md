@@ -21,11 +21,12 @@ Below is thew world model design. We will use sqlite3 as database.
 
 The `pareto_frontiers` table will save top 10 pareto frontier for each strata in current design scope.
 We have 3 tiers data structure in world mode:
-**Tier1**: The meta data: configs, metrics and artifacs. --> executor generated
-**Tier2**: The sumarized info: plan summary. --> analyst generated
+**Tier1**: The experiments data: configs, metrics and artifacs. --> executor generated
+**Tier2**: The sumarized info per plan: plan summary. --> analyst generated
 **Tier3**: The global_summary and global pareto frontier. --> planer used
+**Tier4**: The in-memory data: global_summary, last_plan_summary and pareto_frontiers. --> planer used
 
-### 1.2 Workflow
+### 1.3 Workflow
 
 This project will use langgraph as the agent workflow handler. The graph state should contains values like these:
 
@@ -52,12 +53,14 @@ This project will use langgraph as the agent workflow handler. The graph state s
         # Analyst
         pareto_frontiers: List[Any] # Pareto frontiers from WorldModel
         global_summary: str # Global summary from WorldModel
+        last_plan_summary: str
 
         # Workflow Control
         status: str  # "planning", "executing", "analyzing", "end"
 
 planner -> Executor -> analyst
 
+#### Planner Agent
 The **planner Agent**: check `design_id` in state. If there is no such id, create a new design record and set the design id.
 The planner then use below logic to generate new configs:
 
@@ -81,10 +84,11 @@ The planner then use below logic to generate new configs:
 
 For the first time(there is no global_summary, frontiers and experiments), let LLM give a baseline config.
 
-The planner use the top k pareto frontiers and the `global_summary` to generate the next new configs.
+The planner use the top k pareto frontiers, `last_plan_summary`(current trends) and the `global_summary`(total insights) to generate the next new configs.
 
 The new config should be saved in `configs` in graph state.
 
+#### Executor Agent
 The **Executor Agent** can be blank as I already has an implementation. Currently, just do these things:
 
 1. Create a new record in `plans` table.
@@ -93,6 +97,7 @@ The **Executor Agent** can be blank as I already has an implementation. Currentl
 
 3. Update `experiments` in graph state.
 
+#### Analyst Agent
 The **Analyst Agent** will combine current experiments and the experiments in `pareto_frontiers` table to get the new top k pareto frotiers for each strata, then save them back to `pareto_frontiers` table. the description for `pareto_frontiers` table:
 
 -- `experiment_id` - `experiments`.experiment_id

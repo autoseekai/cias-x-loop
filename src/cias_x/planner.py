@@ -69,11 +69,12 @@ class CIASPlannerAgent:
 
         # Get context
         global_summary = state.get("global_summary", "")
+        last_plan_summary = state.get("last_plan_summary", "")
         pareto_frontiers = state.get("pareto_frontiers", [])
         design_space = state.get("design_space", {})
 
         # 2. Generate configs
-        if not global_summary and not pareto_frontiers:
+        if not global_summary and not pareto_frontiers and not last_plan_summary:
             # First time: Generate baseline configs
             logger.info("No history found. Generating baseline configs.")
             new_configs = self._create_baseline_configs(design_space)
@@ -81,7 +82,7 @@ class CIASPlannerAgent:
             # Use LLM to generate configs
             logger.info("Using LLM to generate new configs based on history.")
             new_configs = self._llm_generate_configs(
-                global_summary, pareto_frontiers, design_space
+                global_summary, last_plan_summary, pareto_frontiers, design_space
             )
 
             if not new_configs:
@@ -100,6 +101,7 @@ class CIASPlannerAgent:
     def _build_planner_prompt(
         self,
         global_summary: str,
+        last_plan_summary: str,
         pareto_frontiers: List[Dict],
         design_space: Dict
     ) -> str:
@@ -123,12 +125,17 @@ class CIASPlannerAgent:
         # Format summary
         summary_text = f"## Global Summary\n{global_summary}\n" if global_summary else "## Global Summary\nNo summary yet (initial exploration phase).\n"
 
+        last_plan_summary = f"## Last Plan Summary\n{last_plan_summary}\n" if last_plan_summary else "## Last Plan Summary\nNo summary yet (initial exploration phase).\n"
+
+
         # Format design space
         ds_text = f"## Design Space (Valid Options)\n```json\n{json.dumps(design_space, indent=2)}\n```\n"
 
         prompt = f"""You are an AI Scientist optimizing SCI (Snapshot Compressive Imaging) reconstruction.
 
 {summary_text}
+
+{last_plan_summary}
 
 {frontier_text}
 
@@ -166,6 +173,7 @@ Ensure all values are from the Design Space options."""
     def _llm_generate_configs(
         self,
         global_summary: str,
+        last_plan_summary: str,
         pareto_frontiers: List[Dict],
         design_space: Dict
     ) -> List[SCIConfiguration]:
@@ -174,7 +182,7 @@ Ensure all values are from the Design Space options."""
             logger.warning("No LLM client available")
             return []
 
-        prompt = self._build_planner_prompt(global_summary, pareto_frontiers, design_space)
+        prompt = self._build_planner_prompt(global_summary, last_plan_summary, pareto_frontiers, design_space)
 
         messages = [
             {"role": "system", "content": "You are an expert AI scientist. Output valid JSON only."},
@@ -254,7 +262,7 @@ Ensure all values are from the Design Space options."""
                     resolution=(256, 256),
                     frame_rate=30
                 ),
-                recon_family=ReconFamily.CIAS_CORE,
+                recon_family=ReconFamily.CIAS_CORE_ELP,
                 recon_params=ReconParams(
                     num_stages=stages,
                     num_features=features,
@@ -306,7 +314,7 @@ Ensure all values are from the Design Space options."""
                     resolution=(256, 256),
                     frame_rate=30
                 ),
-                recon_family=ReconFamily.CIAS_CORE,
+                recon_family=ReconFamily.CIAS_CORE_ELP,
                 recon_params=ReconParams(
                     num_stages=5,
                     num_features=64,
@@ -343,7 +351,7 @@ Ensure all values are from the Design Space options."""
                 resolution=(256, 256),
                 frame_rate=30
             ),
-            recon_family=ReconFamily.CIAS_CORE,
+            recon_family=ReconFamily.CIAS_CORE_ELP,
             recon_params=ReconParams(
                 num_stages=random.choice(design_space.get("num_stages", [7])),
                 num_features=random.choice(design_space.get("num_features", [64])),

@@ -29,6 +29,7 @@ class AgentState(TypedDict):
     # Analyst
     pareto_frontiers: List[Any]  # Pareto frontiers from WorldModel
     global_summary: str  # Global summary from WorldModel
+    last_plan_summary: str  # Last plan summary from WorldModel
 
     # Workflow Control
     status: str  # "planning", "executing", "analyzing", "end"

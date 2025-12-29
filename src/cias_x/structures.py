@@ -14,6 +14,7 @@ class ReconFamily(str, Enum):
     CIAS_CORE = "CIAS-Core"
     CIAS_PLUS = "CIAS-Plus"
     TRADITIONAL = "Traditional"
+    CIAS_CORE_ELP = "CIAS-Core-ELP"
 
 
 class UQScheme(str, Enum):

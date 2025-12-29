@@ -117,6 +117,7 @@ class CIASAnalystAgent:
         return {
             "pareto_frontiers": flat_frontiers,
             "global_summary": global_summary,
+            "last_plan_summary": plan_summary,
             "budget_remaining": new_budget,
             "status": next_status
         }
