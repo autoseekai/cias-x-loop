@@ -21,6 +21,7 @@ from src.cias_x.executor import CIASExecutorAgent
 from src.cias_x.analyst import CIASAnalystAgent
 from src.cias_x.workflow import create_cias_workflow
 from src.cias_x.state import AgentState
+from src.cias_x.structures import AppConfig
 
 # Setup logging
 logging.basicConfig(
@@ -33,12 +34,12 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 
 
-def load_config(config_path: str) -> dict:
+def load_config(config_path: str = "config/default.yaml") -> AppConfig:
     """Load configuration from YAML file."""
     path = Path(config_path)
     if not path.exists():
         logger.warning(f"Config not found: {config_path}")
-        return {}
+        return AppConfig()
 
     with open(path, 'r', encoding='utf-8') as f:
         config = yaml.safe_load(f)
@@ -50,57 +51,48 @@ def load_config(config_path: str) -> dict:
             env_var = api_key[2:-1]
             config['llm']['api_key'] = os.environ.get(env_var, '')
 
-    return config
+    try:
+        return AppConfig(**config)
+    except Exception as e:
+        logger.warning(f"Failed to load config: {e}")
+        return AppConfig()
 
-
-async def run_workflow(args):
+async def run_workflow(_args):
     """Run the CIAS-X workflow."""
     # Load config
-    config = load_config(args.config) if args.config else {}
+    config = load_config()
 
     # Design space
-    design_space = config.get('design_space', {
-        "compression_ratios": [8, 16, 24],
-        "mask_types": ["random", "optimized"],
-        "num_stages": [5, 7, 9],
-        "num_features": [32, 64, 128],
-        "num_blocks": [2, 3, 4],
-        "learning_rates": [1e-4, 5e-5],
-        "activations": ["ReLU", "LeakyReLU"]
-    })
+    design_space = config.design_space
 
     # LLM configuration
-    llm_config = config.get('llm', {
-        'base_url': 'https://api.openai.com/v1',
-        'api_key': os.environ.get('OPENAI_API_KEY', ''),
-        'model': 'gpt-4-turbo-preview',
-    })
+    llm_config = config.llm
 
     # Initialize LLM client
     llm_client = None
-    if llm_config.get('api_key'):
+    if llm_config.api_key:
         try:
             llm_client = LLMClient(llm_config)
         except Exception as e:
             logger.warning(f"Failed to initialize LLM client: {e}")
 
-    # Database path and top-k
-    db_path = args.db or config.get('database', {}).get('path', 'cias_x.db')
-    top_k = args.top_k or config.get('pareto', {}).get('top_k', 10)
-
     # planner config
-    max_configs_per_plan = config.get('planner', {}).get('max_configs_per_plan', 3)
-    design_id = config.get('planner', {}).get('design_id', 0)
+    max_configs_per_plan = config.planner.max_configs_per_plan
+    design_id = config.planner.design_id
 
     # Budget and execution mode
-    budget = args.budget or config.get('experiment', {}).get('budget_max', 10)
-    execution_mode = "remote" if args.remote else config.get('experiment', {}).get("mock_mode", "mock")
-    service_url = args.service_url or config.get('experiment', {}).get('service_url', 'http://localhost:8000')
-    max_token = config.get('experiment', {}).get('max_tokens', 40960)
+    budget = config.experiment.budget_max
+    execution_mode = "remote" if config.experiment.mock_mode else "local"
+    service_url = config.executor.api_base_url
+    max_token = config.experiment.max_tokens
 
     # Initialize components
-    logger.info(f"Initializing CIAS-X with database: {db_path}, top_k={top_k}")
-    world_model = CIASWorldModel(db_path, top_k=top_k)
+    logger.info(f"Initializing CIAS-X with database: {config.database.path}, top_k={config.pareto.top_k}")
+    world_model = CIASWorldModel(
+        config.database.path,
+        top_k=config.pareto.top_k,
+        vector_db=config.vector_db.path,
+        vector_memory=config.vector_memory)
 
     planner = CIASPlannerAgent(llm_client, world_model, max_configs_per_plan)
     executor = CIASExecutorAgent(
@@ -129,7 +121,7 @@ async def run_workflow(args):
     }
 
     mode_desc = f"mode={execution_mode}, service={service_url}" if execution_mode == "remote" else f"mode={execution_mode}"
-    logger.info(f"Starting CIAS-X workflow (budget={budget}, {mode_desc}, top_k={top_k})")
+    logger.info(f"Starting CIAS-X workflow (budget={budget}, {mode_desc}, top_k={config.pareto.top_k})")
     logger.info("=" * 60)
 
     # Run workflow

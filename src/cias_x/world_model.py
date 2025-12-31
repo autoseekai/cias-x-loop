@@ -11,6 +11,8 @@ import logging
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 from contextlib import contextmanager
+import chromadb
+from .structures import VectorMemoryConfig
 
 logger = logging.getLogger(__name__)
 
@@ -26,11 +28,16 @@ class CIASWorldModel:
     - pareto_frontiers: Top-k Pareto frontier configs per strata (with rank)
     """
 
-    def __init__(self, db_path: str = "cias_x.db", top_k: int = 10):
+    def __init__(self, db_path: str = "cias_x.db",
+        top_k: int = 10,
+        vector_db: str = "chromadb",
+        vector_memory: VectorMemoryConfig = VectorMemoryConfig()):
         self.db_path = db_path
         self.top_k = top_k  # Configurable top-k for Pareto frontiers
         self._init_db()
-        logger.info(f"CIASWorldModel initialized with database: {db_path}, top_k={top_k}")
+        self.vector_memory = vector_memory
+        self.chroma_client = chromadb.PersistentClient(path=vector_db)
+        logger.info(f"CIASWorldModel initialized with database: {db_path} and {vector_db}, top_k={top_k}")
 
     @contextmanager
     def _get_conn(self):
@@ -293,16 +300,47 @@ class CIASWorldModel:
             return row[0] if row else 0
     # ==================== Experiment Operations ====================
 
-    def save_experiment(self, plan_id: int, config: Dict, metrics: Dict, artifacts: Dict = None, status: str = "completed") -> int:
-        """Save an experiment result."""
+    def save_experiment(self, plan_id: int, config: Any, metrics: Any, artifacts: Any = None, status: str = "completed") -> int:
+        """
+        Save an experiment result.
+        Accepts Pydantic models or Dicts for config, metrics, artifacts.
+        """
+        # 1. Normalize to Dict for SQLite
+        config_dict = config.model_dump() if hasattr(config, 'model_dump') else config
+        metrics_dict = metrics.model_dump() if hasattr(metrics, 'model_dump') else metrics
+        artifacts_dict = (artifacts.model_dump() if hasattr(artifacts, 'model_dump') else artifacts) or {}
+
+        # 2. Extract experiment_id
+        experiment_id = config_dict.get('experiment_id', 'unknown')
+
         with self._get_conn() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 "INSERT INTO experiments (plan_id, experiment_id, config, metrics, artifacts, status) VALUES (?, ?, ?, ?, ?, ?)",
-                (plan_id, config['experiment_id'], json.dumps(config), json.dumps(metrics), json.dumps(artifacts or {}), status)
+                (plan_id, experiment_id, json.dumps(config_dict), json.dumps(metrics_dict), json.dumps(artifacts_dict), status)
             )
             conn.commit()
-            return cursor.lastrowid
+            exp_id = cursor.lastrowid
+
+        # 3. Save to Vector Store (ChromaDB)
+        try:
+            narrative = self._create_experiment_narrative(config_dict, metrics_dict)
+
+            # Metadata for pre-filtering
+            metadata = {
+                "plan_id": plan_id,
+                "algo": config_dict.get('recon_family', 'Unknown'),
+                "cr": config_dict.get('forward_config', {}).get('compression_ratio', 0),
+                "psnr": metrics_dict.get('psnr', 0.0),
+                "latency": metrics_dict.get('latency', 0.0)
+            }
+
+            self._save_to_vector_store(exp_id, narrative, metadata)
+
+        except Exception as e:
+            logger.warning(f"Failed to save to vector store: {e}")
+
+        return exp_id
 
     def get_experiments_by_plan(self, plan_id: int) -> List[Dict]:
         """Get all experiments for a plan."""
@@ -401,3 +439,74 @@ class CIASWorldModel:
             else:
                 cursor.execute("DELETE FROM pareto_frontiers")
             conn.commit()
+
+    def _create_experiment_narrative(self, config: Dict, metrics: Dict) -> str:
+        """
+        Create a semantic string representation of the experiment for vector embedding.
+        Focus on causal relationships: What parameters led to what results?
+        """
+        # 1. Extract Metrics (Result)
+        psnr = metrics.get('psnr', 0)
+        latency = metrics.get('latency', 0)
+
+        # Add descriptive adjectives for semantic search (e.g., "high quality", "fast")
+        quality = self.vector_memory.narrative_thresholds.quality
+        speed = self.vector_memory.narrative_thresholds.speed
+        quality_adj = "excellent" if psnr > quality.excellent else "good" if psnr> quality.good else "poor"
+        speed_adj = "ultra-fast" if latency < speed.ultra_fast else "fast" if latency < speed.fast else "slow"
+
+        # 2. Extract Config (Cause)
+        algo = config.get('recon_family', 'CIAS-Core-ELP')
+        fc = config.get('forward_config', {})
+        rp = config.get('recon_params', {})
+
+        cr = fc.get('compression_ratio', 0)
+        mask = fc.get('mask_type', 'random')
+        stages = rp.get('num_stages', 0)
+        features = rp.get('num_features', 0)
+
+        # 3. Construct Narrative Template
+        # Pattern: [Result Adjectives] result with [Main Metrics]. Achieved by [Algorithm] with [Key Params].
+        narrative = (
+            f"A {quality_adj} quality (PSNR {psnr:.2f}dB) and {speed_adj} speed ({latency:.1f}ms) result. "
+            f"Achieved by {algo} algorithm with {stages} stages and {features} features "
+            f"at compression ratio {cr} using {mask} mask."
+        )
+
+        return narrative
+
+    def _save_to_vector_store(self, exp_id: int, narrative: str, metadata: Dict):
+        """Save narrative to ChromaDB with metadata for filtering."""
+        if not hasattr(self, 'collection') or self.collection is None:
+             self.collection = self.chroma_client.get_or_create_collection(name="experiments_memory")
+
+        # Add to collection
+        self.collection.add(
+            documents=[narrative],
+            metadatas=[metadata],
+            ids=[str(exp_id)]
+        )
+        logger.debug(f"Saved experiment {exp_id} to vector store.")
+
+    def retrieve_relevant_experiments(self, query: str, k: int = 5) -> List[str]:
+        """
+        Retrieve relevant historical experiments from vector store.
+
+        Args:
+            query: Semantic query string (e.g. "Low latency model with good PSNR")
+            k: Number of results
+
+        Returns:
+            List of narrative strings
+        """
+        if not hasattr(self, 'collection') or self.collection is None:
+             self.collection = self.chroma_client.get_or_create_collection(name="experiments_memory")
+
+        results = self.collection.query(
+            query_texts=[query],
+            n_results=k
+        )
+
+        if results and results['documents']:
+            return results['documents'][0]  # Chroma returns List[List[str]]
+        return []

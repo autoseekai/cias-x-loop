@@ -43,7 +43,7 @@ design_space:
 
 # Experiment Settings
 experiment:
-  budget_max: 10 # max plans per design
+  budget_max: 5 # max plans per design
   max_tokens: 40960
   mock_mode: remote
 
@@ -65,3 +65,23 @@ executor:
 # Database Settings
 database:
   path: "cias-x.db"
+
+vector_db:
+  path: "chromadb"
+
+# Design Goal for Goal-Oriented Exploration
+design_goal:
+  description: "Find an ultra-lightweight model for mobile devices (Low Latency) while keeping acceptable PSNR (>25dB)."
+  constraints:
+    latency_max: 50  # ms
+    compression_ratio_min: 16
+
+# Vector Memory Settings
+vector_memory:
+  narrative_thresholds:
+    quality: # PSNR (Higher is better)
+      excellent: 32.0
+      good: 28.0
+    speed: # Latency ms (Lower is better)
+      ultra_fast: 30.0
+      fast: 60.0

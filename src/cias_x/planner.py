@@ -22,7 +22,9 @@ from src.cias_x.structures import (
     ReconFamily,
     UQScheme,
     SCIConfiguration,
-    TrainConfig
+    TrainConfig,
+    DesignGoal,
+    DesignSpace
 )
 
 logger = logging.getLogger(__name__)
@@ -67,7 +69,8 @@ class CIASPlannerAgent:
         logger.info(f"Created/Retrieved design ID: {design_id}")
 
         # Get context
-        design_space = state.get("design_space", {})
+        design_goal = state.get("design_goal", DesignGoal())
+        design_space = state.get("design_space", DesignSpace())
         token_remaining = state.get("token_remaining", 0)
         latest_plan_summary = state.get("latest_plan_summary", "")
         if not latest_plan_summary:
@@ -75,7 +78,7 @@ class CIASPlannerAgent:
 
         pareto_frontiers = state.get("pareto_frontiers", [])
         if not pareto_frontiers:
-            pareto_frontiers = self.world_model.get_pareto_frontiers(design_space['recon_families'][0])
+            pareto_frontiers = self.world_model.get_pareto_frontiers(design_space.recon_families[0])
 
         # 2. Generate configs
         token_used = 0
@@ -86,8 +89,9 @@ class CIASPlannerAgent:
         else:
             # Use LLM to generate configs
             logger.info("Using LLM to generate new configs based on history.")
+            historical_context = self.world_model.retrieve_relevant_experiments(design_goal.description)
             new_configs, token_used = self._llm_generate_configs(
-                global_summary, latest_plan_summary, pareto_frontiers, design_space
+                global_summary, latest_plan_summary, pareto_frontiers, design_space, historical_context
             )
 
             if not new_configs:
@@ -111,7 +115,8 @@ class CIASPlannerAgent:
         global_summary: str,
         latest_plan_summary: str,
         pareto_frontiers: List[Dict],
-        design_space: Dict
+        design_space: DesignSpace = DesignSpace(),
+        historical_context: str = ""
     ) -> str:
         """Build the LLM prompt for config generation."""
         # Format frontiers with rank
@@ -135,7 +140,19 @@ class CIASPlannerAgent:
 
         latest_plan_summary = f"## Last Plan Summary\n{latest_plan_summary}\n" if latest_plan_summary else "## Last Plan Summary\nNo summary yet (initial exploration phase).\n"
 
+        context_text = ""
+        if historical_context:
+            context_items = "\n".join([f"- {item}" for item in historical_context])
 
+        context_text = f"""
+## Relevant Historical Experience (Memory)
+We retrieved similar experiments from the archives based on your current goal:
+{context_items}
+**Instruction**: Analyze these historical outcomes carefully.
+- If they succeeded, try to exploit similar parameters.
+- If they failed, avoid those specific combinations.
+"""
+        logger.info(f"Context Text: {context_text}")
         # Format design space
         ds_text = f"## Design Space (Valid Options)\n```json\n{json.dumps(design_space, indent=2)}\n```\n"
 
@@ -144,6 +161,8 @@ class CIASPlannerAgent:
 {summary_text}
 
 {latest_plan_summary}
+
+{context_text}
 
 {frontier_text}
 
@@ -183,15 +202,22 @@ Ensure all values are from the Design Space options."""
         self,
         global_summary: str,
         latest_plan_summary: str,
+        historical_context: str,
         pareto_frontiers: List[Dict],
-        design_space: Dict
+        design_space: DesignSpace = DesignSpace()
     ) -> tuple[List[SCIConfiguration], int]:
         """Use LLM to generate experiment configurations."""
         if not self.llm_client:
             logger.warning("No LLM client available")
             return [], 0
 
-        prompt = self._build_planner_prompt(global_summary, latest_plan_summary, pareto_frontiers, design_space)
+        prompt = self._build_planner_prompt(
+            global_summary,
+            latest_plan_summary,
+            pareto_frontiers,
+            design_space,
+            historical_context
+        )
 
         messages = [
             {"role": "system", "content": "You are an expert AI scientist. Output valid JSON only."},
@@ -230,7 +256,7 @@ Ensure all values are from the Design Space options."""
             content = "\n".join(lines)
         return content
 
-    def _create_config_from_dict(self, raw: Dict, design_space: Dict) -> Optional[SCIConfiguration]:
+    def _create_config_from_dict(self, raw: Dict, design_space: DesignSpace = DesignSpace()) -> Optional[SCIConfiguration]:
         """Create SCIConfiguration from a dictionary."""
         try:
             # Handle both flat and nested structures
@@ -255,13 +281,13 @@ Ensure all values are from the Design Space options."""
             epochs = int(tc.get("num_epochs", 50))
 
             # Validate against design space
-            cr = self._validate_option(cr, design_space.get("compression_ratios", [16]))
-            mask = self._validate_option(mask, design_space.get("mask_types", ["random"]))
-            stages = self._validate_option(stages, design_space.get("num_stages", [7]))
-            features = self._validate_option(features, design_space.get("num_features", [64]))
-            blocks = self._validate_option(blocks, design_space.get("num_blocks", [3]))
-            lr = self._validate_lr(lr, design_space.get("learning_rates", [1e-4]))
-            activation = self._validate_option(activation, design_space.get("activations", ["ReLU"]))
+            cr = self._validate_option(cr, design_space.compression_ratios)
+            mask = self._validate_option(mask, design_space.mask_types)
+            stages = self._validate_option(stages, design_space.num_stages)
+            features = self._validate_option(features, design_space.num_features)
+            blocks = self._validate_option(blocks, design_space.num_blocks)
+            lr = self._validate_lr(lr, design_space.learning_rates)
+            activation = self._validate_option(activation, design_space.activations)
 
             return SCIConfiguration(
                 experiment_id=f"exp_{uuid.uuid4().hex[:8]}",
@@ -309,10 +335,10 @@ Ensure all values are from the Design Space options."""
             return lr
         return min(float_options, key=lambda x: abs(x - lr))
 
-    def _create_baseline_configs(self, design_space: Dict) -> List[SCIConfiguration]:
+    def _create_baseline_configs(self, design_space: DesignSpace = DesignSpace()) -> List[SCIConfiguration]:
         """Create baseline configurations for initial exploration."""
         configs = []
-        crs = design_space.get("compression_ratios", [8, 16])
+        crs = design_space.compression_ratios
 
         for cr in crs[:2]:
             config = SCIConfiguration(
@@ -348,27 +374,27 @@ Ensure all values are from the Design Space options."""
 
         return configs
 
-    def _generate_random_config(self, design_space: Dict) -> SCIConfiguration:
+    def _generate_random_config(self, design_space: DesignSpace = DesignSpace()) -> SCIConfiguration:
         """Generate a random configuration as fallback."""
         import random
 
         return SCIConfiguration(
             experiment_id=f"rnd_{uuid.uuid4().hex[:8]}",
             forward_config=ForwardConfig(
-                compression_ratio=random.choice(design_space.get("compression_ratios", [16])),
-                mask_type=random.choice(design_space.get("mask_types", ["random"])),
+                compression_ratio=random.choice(design_space.compression_ratios),
+                mask_type=random.choice(design_space.mask_types),
                 sensor_noise=0.01,
                 resolution=(256, 256),
                 frame_rate=30
             ),
             recon_family=ReconFamily.CIAS_CORE_ELP,
             recon_params=ReconParams(
-                num_stages=random.choice(design_space.get("num_stages", [7])),
-                num_features=random.choice(design_space.get("num_features", [64])),
-                num_blocks=random.choice(design_space.get("num_blocks", [3])),
-                learning_rate=random.choice(design_space.get("learning_rates", [1e-4])),
+                num_stages=random.choice(design_space.num_stages),
+                num_features=random.choice(design_space.num_features),
+                num_blocks=random.choice(design_space.num_blocks),
+                learning_rate=random.choice(design_space.learning_rates),
                 use_physics_prior=True,
-                activation=random.choice(design_space.get("activations", ["ReLU"]))
+                activation=random.choice(design_space.activations)
             ),
             uq_scheme=UQScheme.CONFORMAL,
             uq_params={},

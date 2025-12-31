@@ -1,19 +1,17 @@
-"""
-LLM Client - OpenAI-compatible Large Language Model Client
-
-Supports OpenAI, DeepSeek, Qwen, Moonshot, Ollama and other services
-"""
-
-from typing import Dict, List, Any
+from __future__ import annotations
+from typing import TYPE_CHECKING, Dict, List, Any
 
 from loguru import logger
 from openai import OpenAI
+
+if TYPE_CHECKING:
+    from src.cias_x.structures import LLMConfig
 
 
 class LLMClient:
     """OpenAI-compatible LLM client"""
 
-    def __init__(self, config: Dict[str, Any]):
+    def __init__(self, config: LLMConfig):
         """
         Initialize LLM client
 
@@ -25,11 +23,11 @@ class LLMClient:
                 - temperature: Temperature parameter (default 0.3)
                 - max_tokens: Maximum tokens (default 4096)
         """
-        self.base_url = config.get('base_url', 'https://api.openai.com/v1')
-        self.api_key = config['api_key']
-        self.model = config.get('model', 'gpt-4-turbo-preview')
-        self.temperature = config.get('temperature', 0.3)
-        self.max_tokens = config.get('max_tokens', 4096)
+        self.base_url = config.base_url
+        self.api_key = config.api_key
+        self.model = config.model
+        self.temperature = config.temperature
+        self.max_tokens = config.max_tokens
 
         self.client = OpenAI(
             api_key=self.api_key,

@@ -102,16 +102,16 @@ class CIASAnalystAgent:
         # Update global summary if threshold reached
         token_used_design = self._try_update_global_summary(design_id)
 
-        # Determine next status
-        new_budget = budget_remaining - 1 # each plan - execution - analysis costs 1 budget
-        next_status = "planning" if new_budget > 0 else "end"
-
         self.world_model.append_plan_token_used(plan_id=latest_plan_id, token_used=analysis_used, token_type="analysis")
         self.world_model.append_plan_token_used(plan_id=latest_plan_id, token_used=token_used_design, token_type="global_summary")
 
         token_remaining = token_remaining - analysis_used - token_used_design
         token_remaining = 0 if token_remaining <= 0 else token_remaining
         logger.info(f"Analyst Agent: Analysis complete. Budget remaining: {new_budget}. Token remaining: {token_remaining}")
+
+        # Determine next status
+        new_budget = budget_remaining - len(current_experiments)
+        next_status = "planning" if new_budget > 0 and token_remaining > 0 else "end"
 
         return {
             "pareto_frontiers": flat_frontiers,

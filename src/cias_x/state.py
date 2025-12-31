@@ -5,6 +5,7 @@ Global State for the AI Scientist Multi-Agent Workflow (LangGraph)
 """
 
 from typing import List, Dict, Any, TypedDict
+from .structures import DesignGoal
 
 
 class AgentState(TypedDict):
@@ -20,6 +21,7 @@ class AgentState(TypedDict):
 
     # Design info
     design_id: int
+    design_goal: DesignGoal
 
     # Planner
     configs: List[Any]  # Proposed configs for current plan cycle
