@@ -26,7 +26,7 @@ The system is built upon a modular architecture where agents act as nodes in a w
 
 The core logic is defined in `sci_loop.py` and `src/core/workflow_graph.py`. The workflow follows this high-level topology:
 
-```mermaid
+```
 graph TD
     Start([Start]) --> Planner
     Planner --> Reviewer
